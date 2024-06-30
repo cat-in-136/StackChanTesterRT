@@ -15,6 +15,12 @@
 #define SERVO_PIN_X 2
 #define SERVO_PIN_Y 5
 
+#define SDU_APP_PATH "/StackChanC136.bin"
+#define TFCARD_CS_PIN 4
+
+enum OperationMode { Idle = 0, Random, MaxOperationMode };
+
+OperationMode op_mode = OperationMode::Idle;
 m5avatar::Avatar avatar;
 ServoController servo_controller;
 
@@ -45,8 +51,43 @@ void setup() {
   avatar.setBatteryIcon(true);
 }
 
+static void loopRandom() {
+  static unsigned long last_action_millis = 0;
+
+  if (M5.BtnC.wasDoubleClicked()) {
+    avatar.setBatteryIcon(false);
+  } else if (M5.BtnC.wasSingleClicked()) {
+    op_mode = OperationMode::Idle;
+    avatar.setBatteryIcon(true);
+    return;
+  }
+
+  const auto now = millis();
+
+  if (servo_controller.isMoving()) {
+    // do nothing
+  } else if (now > last_action_millis) {
+    const auto x = random(45, 135);
+    const auto y = random(60, 80);
+    const auto delay_time = random(10);
+    const auto interval_add = random(10);
+
+    servo_controller.moveXY(x, y, 1000 + 100 * delay_time);
+    last_action_millis =
+        now + 1000 + 100 * delay_time + 1000 + 400 * interval_add;
+  }
+}
+
 void loop() {
   M5.update();
+
+  if (op_mode == OperationMode::Idle) {
+    if (M5.BtnC.wasPressed()) {
+      op_mode = OperationMode::Random;
+    }
+  } else if (op_mode == OperationMode::Random) {
+    loopRandom();
+  }
 
   processSCPI();
   servo_controller.update();
