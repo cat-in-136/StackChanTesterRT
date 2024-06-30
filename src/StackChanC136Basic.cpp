@@ -18,7 +18,7 @@
 #define SDU_APP_PATH "/StackChanC136.bin"
 #define TFCARD_CS_PIN 4
 
-enum OperationMode { Idle = 0, TestSurvo, Random, MaxOperationMode };
+enum OperationMode { Idle = 0, Adjust, TestSurvo, Random, MaxOperationMode };
 
 OperationMode op_mode = OperationMode::Idle;
 m5avatar::Avatar avatar;
@@ -88,6 +88,75 @@ static void loopTestServo() {
   }
 }
 
+static void loopAdjust() {
+  static enum adjust_mode_t {
+    Init = 0,
+    AdjustX,
+    AdjustY
+  } adjust_mode = adjust_mode_t::Init;
+
+  if (servo_controller.isMoving()) {
+    return;
+  }
+
+  bool adjust_mode_changed = false;
+  int8_t delta_x = 0;
+  int8_t delta_y = 0;
+
+  if (M5.BtnA.wasPressed()) {
+    if (adjust_mode == adjust_mode_t::AdjustX) {
+      delta_x--;
+    } else if (adjust_mode == adjust_mode_t::AdjustY) {
+      delta_y--;
+    }
+  }
+  if (M5.BtnB.wasDoubleClicked()) {
+    op_mode = OperationMode::Idle;
+    adjust_mode = adjust_mode_t::Init;
+    avatar.setSpeechText("");
+    return;
+  }
+  if (M5.BtnB.wasPressed()) {
+    if (adjust_mode == adjust_mode_t::AdjustX) {
+      adjust_mode = adjust_mode_t::AdjustY;
+      adjust_mode_changed = true;
+    } else if (adjust_mode == adjust_mode_t::AdjustY) {
+      adjust_mode = adjust_mode_t::AdjustX;
+      adjust_mode_changed = true;
+    }
+  }
+  if (M5.BtnC.wasPressed()) {
+    if (adjust_mode == adjust_mode_t::AdjustX) {
+      delta_x++;
+    } else if (adjust_mode == adjust_mode_t::AdjustY) {
+      delta_y++;
+    }
+  }
+  if (adjust_mode == adjust_mode_t::Init) {
+    adjust_mode = adjust_mode_t::AdjustX;
+    adjust_mode_changed = true;
+  }
+
+  if (adjust_mode_changed || delta_x != 0 || delta_y != 0) {
+    char s[64];
+    if (adjust_mode == adjust_mode_t::AdjustX) {
+      const auto servo_offset_x = servo_controller.getServoOffsetX() + delta_x;
+      if (delta_x != 0) {
+        servo_controller.setServoOffsetX(servo_offset_x);
+      }
+      snprintf(s, sizeof(s), "%s:%d:BtnB:X/Y", "X", servo_offset_x);
+    } else if (adjust_mode == adjust_mode_t::AdjustY) {
+      const auto servo_offset_y = servo_controller.getServoOffsetY() + delta_y;
+      if (delta_y != 0) {
+        servo_controller.setServoOffsetX(servo_offset_y);
+      }
+      snprintf(s, sizeof(s), "%s:%d:BtnB:X/Y", "Y", servo_offset_y);
+    }
+    servo_controller.moveXY(90, 90);
+    avatar.setSpeechText(s);
+  }
+}
+
 static void loopRandom() {
   static unsigned long last_action_millis = 0;
 
@@ -134,12 +203,19 @@ void loop() {
   M5.update();
 
   if (op_mode == OperationMode::Idle) {
-    if (M5.BtnB.wasSingleClicked()) {
+    if (M5.BtnA.wasDoubleClicked()) {
+      servo_controller.moveXY(90, 90);
+      op_mode = OperationMode::Adjust;
+    } else if (M5.BtnA.wasPressed()) {
+      servo_controller.moveXY(90, 90);
+    } else if (M5.BtnB.wasSingleClicked()) {
       op_mode = OperationMode::TestSurvo;
     } else if (M5.BtnC.wasPressed()) {
       op_mode = OperationMode::Random;
     }
     loopRandomMouthOpen();
+  } else if (op_mode == OperationMode::Adjust) {
+    loopAdjust();
   } else if (op_mode == OperationMode::TestSurvo) {
     loopTestServo();
   } else if (op_mode == OperationMode::Random) {
