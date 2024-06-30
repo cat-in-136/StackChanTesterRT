@@ -18,7 +18,7 @@
 #define SDU_APP_PATH "/StackChanC136.bin"
 #define TFCARD_CS_PIN 4
 
-enum OperationMode { Idle = 0, Random, MaxOperationMode };
+enum OperationMode { Idle = 0, TestSurvo, Random, MaxOperationMode };
 
 OperationMode op_mode = OperationMode::Idle;
 m5avatar::Avatar avatar;
@@ -49,6 +49,43 @@ void setup() {
 
   avatar.init();
   avatar.setBatteryIcon(true);
+}
+
+static void loopTestServo() {
+  static uint8_t step = 0;
+
+  if (M5.BtnB.wasSingleClicked()) {
+    avatar.setSpeechText("Stop Test Servo...");
+    servo_controller.moveXY(90, 90, 1000);
+    step = 100; // force quit
+  }
+
+  if (servo_controller.isMoving()) {
+    // wait for moving done.
+  } else {
+    if (step >= 10) {
+      step = 0;
+      avatar.setSpeechText("");
+      op_mode = OperationMode::Idle;
+      return;
+    } else if (step % 5 == 0) {
+      avatar.setSpeechText("X 90 -> 0  ");
+      servo_controller.moveX(0);
+    } else if (step % 5 == 1) {
+      avatar.setSpeechText("X 0 -> 180  ");
+      servo_controller.moveX(180);
+    } else if (step % 5 == 2) {
+      avatar.setSpeechText("X 180 -> 90  ");
+      servo_controller.moveX(90);
+    } else if (step % 5 == 3) {
+      avatar.setSpeechText("Y 90 -> 50  ");
+      servo_controller.moveY(50);
+    } else if (step % 5 == 4) {
+      avatar.setSpeechText("Y 50 -> 90  ");
+      servo_controller.moveY(90);
+    }
+    step++;
+  }
 }
 
 static void loopRandom() {
@@ -82,9 +119,13 @@ void loop() {
   M5.update();
 
   if (op_mode == OperationMode::Idle) {
-    if (M5.BtnC.wasPressed()) {
+    if (M5.BtnB.wasSingleClicked()) {
+      op_mode = OperationMode::TestSurvo;
+    } else if (M5.BtnC.wasPressed()) {
       op_mode = OperationMode::Random;
     }
+  } else if (op_mode == OperationMode::TestSurvo) {
+    loopTestServo();
   } else if (op_mode == OperationMode::Random) {
     loopRandom();
   }
