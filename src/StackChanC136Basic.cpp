@@ -115,6 +115,21 @@ static void loopRandom() {
   }
 }
 
+static void loopRandomMouthOpen() {
+  static const uint16_t mouth_wait = 2000;
+  static const uint16_t mouth_open_time = 200;
+  static unsigned long last_mouth_millis = 0;
+
+  const unsigned long millis_since_last_mouth = millis() - last_mouth_millis;
+  if (millis_since_last_mouth > mouth_open_time + mouth_wait) {
+    const float r = (max(random(15), 10l) - 10) / 5.0f;
+    avatar.setMouthOpenRatio(r);
+    last_mouth_millis = millis();
+  } else if (millis_since_last_mouth > mouth_open_time) {
+    avatar.setMouthOpenRatio(0.0);
+  }
+}
+
 void loop() {
   M5.update();
 
@@ -124,10 +139,12 @@ void loop() {
     } else if (M5.BtnC.wasPressed()) {
       op_mode = OperationMode::Random;
     }
+    loopRandomMouthOpen();
   } else if (op_mode == OperationMode::TestSurvo) {
     loopTestServo();
   } else if (op_mode == OperationMode::Random) {
     loopRandom();
+    loopRandomMouthOpen();
   }
 
   processSCPI();
