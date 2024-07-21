@@ -27,8 +27,6 @@ public:
   void waitForAllServosToStop();
 
 private:
-  struct ServoEasing *servo_x = nullptr;
-  struct ServoEasing *servo_y = nullptr;
   unsigned long servo_move_end_millis = 0;
 
   int servo_offset_x = 0;

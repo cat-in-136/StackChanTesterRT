@@ -1,4 +1,4 @@
-# StackChanC136
+# StackChanTesterRT
 
-cat_in_136's stack-chan firmware
+A stack-chan tester firmware for stackchan RT(M5StackS3/Dynamixel) version
 

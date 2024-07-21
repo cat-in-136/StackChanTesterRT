@@ -1,7 +1,4 @@
 #include <M5Unified.h>
-#if __has_include(<M5StackUpdater.h>)
-#include <M5StackUpdater.h>
-#endif
 
 #include "scpi_handlers.h"
 #include "servo_controller.h"
@@ -15,9 +12,6 @@
 #define SERVO_PIN_X 2
 #define SERVO_PIN_Y 5
 
-#define SDU_APP_PATH "/StackChanC136.bin"
-#define TFCARD_CS_PIN 4
-
 enum OperationMode { Idle = 0, Adjust, TestSurvo, Random, MaxOperationMode };
 
 OperationMode op_mode = OperationMode::Idle;
@@ -28,15 +22,6 @@ void setup() {
   auto cfg = M5.config();
   cfg.output_power = true;
   M5.begin(cfg);
-
-#if __has_include(<M5StackUpdater.h>)
-  M5.update();
-  if (M5.BtnA.isPressed()) {
-    M5_LOGI("Will Load menu binary");
-    updateFromFS(SD);
-    ESP.restart();
-  }
-#endif // if __has_include(<M5StackUpdater.h>)
 
   M5.Log.setLogLevel(m5::log_target_display, ESP_LOG_NONE);
   M5.Log.setLogLevel(m5::log_target_serial, ESP_LOG_INFO);
