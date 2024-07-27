@@ -44,7 +44,7 @@ void setup() {
 static void loopTestServo() {
   static uint8_t step = 0;
 
-  if (M5.BtnB.wasSingleClicked()) {
+  if (M5.BtnB.wasPressed()) {
     avatar.setSpeechText("Stop Test Servo...");
     servo_controller.moveXY(0, 0);
     step = 100; // force quit
@@ -108,7 +108,7 @@ static void loopAdjust() {
     avatar.setSpeechText("");
     return;
   }
-  if (M5.BtnB.wasPressed()) {
+  if (M5.BtnB.wasSingleClicked()) {
     if (adjust_mode == adjust_mode_t::AdjustX) {
       adjust_mode = adjust_mode_t::AdjustY;
       adjust_mode_changed = true;
@@ -198,11 +198,11 @@ void loop() {
     if (M5.BtnA.wasDoubleClicked()) {
       servo_controller.moveXY(0, 0);
       op_mode = OperationMode::Adjust;
-    } else if (M5.BtnA.wasPressed()) {
+    } else if (M5.BtnA.wasSingleClicked()) {
       servo_controller.moveXY(0, 0);
     } else if (M5.BtnB.wasSingleClicked()) {
       op_mode = OperationMode::TestSurvo;
-    } else if (M5.BtnC.wasPressed()) {
+    } else if (M5.BtnC.wasSingleClicked()) {
       op_mode = OperationMode::Random;
     }
     loopRandomMouthOpen();
