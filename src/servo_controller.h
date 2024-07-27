@@ -2,7 +2,7 @@
 #include <Dynamixel2Arduino.h>
 #include <stdint.h>
 
-#define DEFAULT_START_DEGREE_VALUE_X 360
+#define DEFAULT_START_DEGREE_VALUE_X 180
 #define DEFAULT_START_DEGREE_VALUE_Y 180
 
 class ServoController {

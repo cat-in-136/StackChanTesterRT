@@ -88,8 +88,8 @@ bool ServoController::update() {
   const auto status_y =
       dxl.readControlTableItem(ControlTableItem::MOVING_STATUS, id_y);
 
-  is_moving_x = (status_x & 0x03) != 0x01;
-  is_moving_y = (status_y & 0x03) != 0x01;
+  is_moving_x = (status_x & 0x02) != 0x00;
+  is_moving_y = (status_y & 0x02) != 0x00;
 
   const auto pos_x = dxl.getPresentPosition(id_x, UNIT_DEGREE);
   const auto pos_y = dxl.getPresentPosition(id_y, UNIT_DEGREE);

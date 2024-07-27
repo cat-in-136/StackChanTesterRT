@@ -68,10 +68,10 @@ static void loopTestServo() {
       avatar.setSpeechText("X +90 ->   0");
       servo_controller.moveX(0);
     } else if (step % 5 == 3) {
-      avatar.setSpeechText("Y   0 -> -10");
-      servo_controller.moveY(-10);
+      avatar.setSpeechText("Y   0 -> -15");
+      servo_controller.moveY(-15);
     } else if (step % 5 == 4) {
-      avatar.setSpeechText("Y -10 ->   0");
+      avatar.setSpeechText("Y -15 ->   0");
       servo_controller.moveY(0);
     }
     step++;
@@ -136,13 +136,13 @@ static void loopAdjust() {
       if (delta_x != 0) {
         servo_controller.setServoOffsetX(servo_offset_x);
       }
-      snprintf(s, sizeof(s), "%s:%d:BtnB:X/Y", "X", servo_offset_x);
+      snprintf(s, sizeof(s), "%s:%f:BtnB:X/Y", "X", servo_offset_x);
     } else if (adjust_mode == adjust_mode_t::AdjustY) {
       const auto servo_offset_y = servo_controller.getServoOffsetY() + delta_y;
       if (delta_y != 0) {
-        servo_controller.setServoOffsetX(servo_offset_y);
+        servo_controller.setServoOffsetY(servo_offset_y);
       }
-      snprintf(s, sizeof(s), "%s:%d:BtnB:X/Y", "Y", servo_offset_y);
+      snprintf(s, sizeof(s), "%s:%f:BtnB:X/Y", "Y", servo_offset_y);
     }
     servo_controller.moveXY(0, 0);
     avatar.setSpeechText(s);
