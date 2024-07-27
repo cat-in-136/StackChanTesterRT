@@ -41,6 +41,43 @@ void setup() {
   avatar.setBatteryIcon(true);
 }
 
+static void loopIdle() {
+  if (M5.BtnA.wasDoubleClicked()) {
+    servo_controller.moveXY(0, 0);
+    op_mode = OperationMode::Adjust;
+  } else if (M5.BtnA.wasSingleClicked()) {
+    servo_controller.moveXY(0, 0);
+  } else if (M5.BtnB.wasSingleClicked()) {
+    op_mode = OperationMode::TestSurvo;
+  } else if (M5.BtnC.wasSingleClicked()) {
+    op_mode = OperationMode::Random;
+  }
+
+  // random mouth and lyrics
+  if (op_mode == OperationMode::Idle) {
+    static const uint16_t mouth_wait = 2000;
+    static const uint16_t mouth_open_time = 200;
+    static unsigned long last_mouth_millis = 0;
+
+    static const char *lyrics[] = {"BtnA:ResetMove ", "BtnB:ServoTest  ",
+                                   "BtnC:RandomMode  ", "BtnA x2:AdjustMode "};
+    static const size_t lyrics_size = sizeof(lyrics) / sizeof(lyrics[0]);
+    static uint_fast8_t lyrics_idx = 0;
+
+    const unsigned long millis_since_last_mouth = millis() - last_mouth_millis;
+    if (millis_since_last_mouth > mouth_open_time + mouth_wait) {
+      const char *const l = lyrics[lyrics_idx++ % lyrics_size];
+      avatar.setMouthOpenRatio(0.7);
+      avatar.setSpeechText(l);
+      last_mouth_millis = millis();
+    } else if (millis_since_last_mouth > mouth_open_time) {
+      avatar.setMouthOpenRatio(0.0);
+    }
+  } else {
+    avatar.setSpeechText("");
+  }
+}
+
 static void loopTestServo() {
   static uint8_t step = 0;
 
@@ -170,23 +207,23 @@ static void loopRandom() {
     const auto interval_add = random(10);
 
     servo_controller.moveXY(x, y);
-    last_action_millis =
-        now + 2000 + 400 * interval_add;
+    last_action_millis = now + 2000 + 400 * interval_add;
   }
-}
 
-static void loopRandomMouthOpen() {
-  static const uint16_t mouth_wait = 2000;
-  static const uint16_t mouth_open_time = 200;
-  static unsigned long last_mouth_millis = 0;
+  // random mouth
+  {
+    static const uint16_t mouth_wait = 2000;
+    static const uint16_t mouth_open_time = 200;
+    static unsigned long last_mouth_millis = 0;
 
-  const unsigned long millis_since_last_mouth = millis() - last_mouth_millis;
-  if (millis_since_last_mouth > mouth_open_time + mouth_wait) {
-    const float r = (max(random(15), 10l) - 10) / 5.0f;
-    avatar.setMouthOpenRatio(r);
-    last_mouth_millis = millis();
-  } else if (millis_since_last_mouth > mouth_open_time) {
-    avatar.setMouthOpenRatio(0.0);
+    const unsigned long millis_since_last_mouth = millis() - last_mouth_millis;
+    if (millis_since_last_mouth > mouth_open_time + mouth_wait) {
+      const float r = (max(random(15), 10l) - 10) / 5.0f;
+      avatar.setMouthOpenRatio(r);
+      last_mouth_millis = millis();
+    } else if (millis_since_last_mouth > mouth_open_time) {
+      avatar.setMouthOpenRatio(0.0);
+    }
   }
 }
 
@@ -195,24 +232,13 @@ void loop() {
   unifiedButton.update();
 
   if (op_mode == OperationMode::Idle) {
-    if (M5.BtnA.wasDoubleClicked()) {
-      servo_controller.moveXY(0, 0);
-      op_mode = OperationMode::Adjust;
-    } else if (M5.BtnA.wasSingleClicked()) {
-      servo_controller.moveXY(0, 0);
-    } else if (M5.BtnB.wasSingleClicked()) {
-      op_mode = OperationMode::TestSurvo;
-    } else if (M5.BtnC.wasSingleClicked()) {
-      op_mode = OperationMode::Random;
-    }
-    loopRandomMouthOpen();
+    loopIdle();
   } else if (op_mode == OperationMode::Adjust) {
     loopAdjust();
   } else if (op_mode == OperationMode::TestSurvo) {
     loopTestServo();
   } else if (op_mode == OperationMode::Random) {
     loopRandom();
-    loopRandomMouthOpen();
   }
 
   processSCPI();
