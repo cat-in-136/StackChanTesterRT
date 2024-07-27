@@ -1,34 +1,41 @@
 #pragma once
+#include <Dynamixel2Arduino.h>
 #include <stdint.h>
 
-#define DEFAULT_START_DEGREE_VALUE_X 90
-#define DEFAULT_START_DEGREE_VALUE_Y 90
+#define DEFAULT_START_DEGREE_VALUE_X 360
+#define DEFAULT_START_DEGREE_VALUE_Y 180
 
 class ServoController {
 public:
-  ServoController();
+  ServoController(HardwareSerial &serial);
   ~ServoController();
 
-  void begin(int pin_x, int pin_y,
+  void begin(uint8_t id_x = 1, uint8_t id_y = 2,
              int start_x_degree = DEFAULT_START_DEGREE_VALUE_X,
              int start_y_degree = DEFAULT_START_DEGREE_VALUE_Y);
 
-  void moveX(int x, uint32_t millis_for_move = 0);
-  void moveY(int y, uint32_t millis_for_move = 0);
-  void moveXY(int x, int y, uint32_t millis_for_move = 0);
+  void moveX(float x);
+  void moveY(float y);
+  void moveXY(float x, float y);
 
-  inline int getServoOffsetX() { return servo_offset_x; };
-  inline int getServoOffsetY() { return servo_offset_y; };
-  inline void setServoOffsetX(int offset) { servo_offset_x = offset; };
-  inline void setServoOffsetY(int offset) { servo_offset_y = offset; };
+  inline float getServoOffsetX() { return servo_offset_x; };
+  inline float getServoOffsetY() { return servo_offset_y; };
+  inline void setServoOffsetX(float offset) { servo_offset_x = offset; };
+  inline void setServoOffsetY(float offset) { servo_offset_y = offset; };
 
   bool update();
   bool isMoving();
   void waitForAllServosToStop();
 
 private:
-  unsigned long servo_move_end_millis = 0;
+  HardwareSerial &serial;
+  Dynamixel2Arduino dxl;
+  uint8_t id_x;
+  uint8_t id_y;
 
-  int servo_offset_x = 0;
-  int servo_offset_y = 0;
+  float servo_offset_x = DEFAULT_START_DEGREE_VALUE_X;
+  float servo_offset_y = DEFAULT_START_DEGREE_VALUE_Y;
+
+  bool is_moving_x = false;
+  bool is_moving_y = false;
 };

@@ -3,25 +3,28 @@
 #include "scpi_handlers.h"
 #include "servo_controller.h"
 #include <Avatar.h>
+#include <gob_unifiedButton.hpp>
 
-// M5Stack Basic/Gray/Go
-// Port.A X:G22, Y:G21
-// Port.C X:G16, Y:G17
-// Stack-chan PCB: X:G5, Y:G2
-// hand-maid: X:G2, Y:G5
-#define SERVO_PIN_X 2
-#define SERVO_PIN_Y 5
+goblib::UnifiedButton unifiedButton;
+
+// Stackchan RT
+#define DXL_RX_PIN 6
+#define DXL_TX_PIN 7
+#define DXL_BAUD 1000000
+static HardwareSerial &DXL_SERIAL = Serial1;
 
 enum OperationMode { Idle = 0, Adjust, TestSurvo, Random, MaxOperationMode };
 
 OperationMode op_mode = OperationMode::Idle;
 m5avatar::Avatar avatar;
-ServoController servo_controller;
+ServoController servo_controller(DXL_SERIAL);
 
 void setup() {
   auto cfg = M5.config();
   cfg.output_power = true;
   M5.begin(cfg);
+  unifiedButton.begin(&M5.Display,
+                      goblib::UnifiedButton::appearance_t::transparent_all);
 
   M5.Log.setLogLevel(m5::log_target_display, ESP_LOG_NONE);
   M5.Log.setLogLevel(m5::log_target_serial, ESP_LOG_INFO);
@@ -30,7 +33,9 @@ void setup() {
   M5.In_I2C.release();
 
   setupSCPI();
-  servo_controller.begin(SERVO_PIN_X, SERVO_PIN_Y);
+  DXL_SERIAL.begin(DXL_BAUD, SERIAL_8N1, DXL_RX_PIN, DXL_TX_PIN);
+  delay(1000);
+  servo_controller.begin();
 
   avatar.init();
   avatar.setBatteryIcon(true);
@@ -41,7 +46,7 @@ static void loopTestServo() {
 
   if (M5.BtnB.wasSingleClicked()) {
     avatar.setSpeechText("Stop Test Servo...");
-    servo_controller.moveXY(90, 90, 1000);
+    servo_controller.moveXY(0, 0);
     step = 100; // force quit
   }
 
@@ -54,22 +59,24 @@ static void loopTestServo() {
       op_mode = OperationMode::Idle;
       return;
     } else if (step % 5 == 0) {
-      avatar.setSpeechText("X 90 -> 0  ");
-      servo_controller.moveX(0);
+      avatar.setSpeechText("X   0 -> -90 ");
+      servo_controller.moveX(-90);
     } else if (step % 5 == 1) {
-      avatar.setSpeechText("X 0 -> 180  ");
-      servo_controller.moveX(180);
-    } else if (step % 5 == 2) {
-      avatar.setSpeechText("X 180 -> 90  ");
+      avatar.setSpeechText("X -90 -> +90");
       servo_controller.moveX(90);
+    } else if (step % 5 == 2) {
+      avatar.setSpeechText("X +90 ->   0");
+      servo_controller.moveX(0);
     } else if (step % 5 == 3) {
-      avatar.setSpeechText("Y 90 -> 50  ");
-      servo_controller.moveY(50);
+      avatar.setSpeechText("Y   0 -> -10");
+      servo_controller.moveY(-10);
     } else if (step % 5 == 4) {
-      avatar.setSpeechText("Y 50 -> 90  ");
-      servo_controller.moveY(90);
+      avatar.setSpeechText("Y -10 ->   0");
+      servo_controller.moveY(0);
     }
     step++;
+    delay(1000);
+    servo_controller.waitForAllServosToStop();
   }
 }
 
@@ -137,7 +144,7 @@ static void loopAdjust() {
       }
       snprintf(s, sizeof(s), "%s:%d:BtnB:X/Y", "Y", servo_offset_y);
     }
-    servo_controller.moveXY(90, 90);
+    servo_controller.moveXY(0, 0);
     avatar.setSpeechText(s);
   }
 }
@@ -158,14 +165,13 @@ static void loopRandom() {
   if (servo_controller.isMoving()) {
     // do nothing
   } else if (now > last_action_millis) {
-    const auto x = random(45, 135);
-    const auto y = random(60, 80);
-    const auto delay_time = random(10);
+    const auto x = random(-45, +45);
+    const auto y = random(-10, 10);
     const auto interval_add = random(10);
 
-    servo_controller.moveXY(x, y, 1000 + 100 * delay_time);
+    servo_controller.moveXY(x, y);
     last_action_millis =
-        now + 1000 + 100 * delay_time + 1000 + 400 * interval_add;
+        now + 2000 + 400 * interval_add;
   }
 }
 
@@ -186,13 +192,14 @@ static void loopRandomMouthOpen() {
 
 void loop() {
   M5.update();
+  unifiedButton.update();
 
   if (op_mode == OperationMode::Idle) {
     if (M5.BtnA.wasDoubleClicked()) {
-      servo_controller.moveXY(90, 90);
+      servo_controller.moveXY(0, 0);
       op_mode = OperationMode::Adjust;
     } else if (M5.BtnA.wasPressed()) {
-      servo_controller.moveXY(90, 90);
+      servo_controller.moveXY(0, 0);
     } else if (M5.BtnB.wasSingleClicked()) {
       op_mode = OperationMode::TestSurvo;
     } else if (M5.BtnC.wasPressed()) {
