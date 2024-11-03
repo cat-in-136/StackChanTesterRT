@@ -1,5 +1,6 @@
 #include <M5Unified.h>
 
+#include "scpi_handlers.h"
 #include "servo_controller.h"
 #include <Avatar.h>
 #include <gob_unifiedButton.hpp>
@@ -31,6 +32,7 @@ void setup() {
 
   M5.In_I2C.release();
 
+  setupSCPI();
   DXL_SERIAL.begin(DXL_BAUD, SERIAL_8N1, DXL_RX_PIN, DXL_TX_PIN);
   delay(1000);
   servo_controller.begin();
@@ -239,6 +241,7 @@ void loop() {
     loopRandom();
   }
 
+  processSCPI();
   servo_controller.update();
   delay(1);
 }
