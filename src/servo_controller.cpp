@@ -94,9 +94,10 @@ bool ServoController::update() {
   const auto pos_x = dxl.getPresentPosition(id_x, UNIT_DEGREE);
   const auto pos_y = dxl.getPresentPosition(id_y, UNIT_DEGREE);
 
-  // XXX DEBUG
-  M5_LOGI("pos (%f,%f), status x:%02x, y:%02x, moving_x:%d,moving_y:%d", pos_x,
-          pos_y, status_x, status_y, is_moving_x ? 1 : 0, is_moving_y);
+  //// XXX DEBUG
+  // M5_LOGI("pos (%f,%f), status x:%02x, y:%02x, moving_x:%d,moving_y:%d",
+  // pos_x,
+  //         pos_y, status_x, status_y, is_moving_x ? 1 : 0, is_moving_y);
 
   const bool is_moving = is_moving_x || is_moving_y;
   return is_moving;
