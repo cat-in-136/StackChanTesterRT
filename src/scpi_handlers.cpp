@@ -114,12 +114,12 @@ void setupSCPI(void) {
       });
 
   scpi.SetCommandTreeBase(F(""));
-  scpi.RegisterCommand(F("*IDN?"), [](SCPI_C commands, SCPI_P parameters,
-                                      Stream &interface) {
-    const uint64_t efuseMac = ESP.getEfuseMac();
-    interface.printf("@cat_in_136,StackChanC136Basic,#%08lx,v0.0.0", efuseMac);
-    interface.println();
-  });
+  scpi.RegisterCommand(
+      F("*IDN?"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
+        const uint64_t efuseMac = ESP.getEfuseMac();
+        interface.printf("@cat_in_136,StackChanS3RT,#%08lx,v0.0.0", efuseMac);
+        interface.println();
+      });
   scpi.RegisterCommand(
       F("*LRN?"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
         Preferences preferences;
@@ -165,6 +165,7 @@ void processSCPI(void) {
     if (message[strlen(message) - 1] == '\r') {
       message[strlen(message) - 1] = 0;
     }
+    M5_LOGD("SCPI Command: %s", message);
     scpi.Execute(message, Serial);
   }
 }

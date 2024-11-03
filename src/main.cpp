@@ -44,10 +44,15 @@ void setup() {
   cfg.external_speaker.atomic_spk = true;
 
   M5.begin(cfg);
+  Serial.begin(115200);
 
-  M5.Log.setLogLevel(m5::log_target_display, ESP_LOG_NONE);
-  M5.Log.setLogLevel(m5::log_target_serial, ESP_LOG_INFO);
+  M5.Log.setLogLevel(m5::log_target_display, ESP_LOG_INFO);
+  // XXX Do not set log level for m5::log_target_serial! this break
+  // Serial.read()!
+  // M5.Log.setLogLevel(m5::log_target_serial, ESP_LOG_INFO);
   // M5.Log.setEnableColor(m5::log_target_serial, false);
+
+  setupSCPI();
 
   M5.Display.setEpdMode(epd_mode_t::epd_fastest);
   M5.Display.setTextWrap(true);
@@ -56,6 +61,7 @@ void setup() {
     /// Landscape mode.
     M5.Display.setRotation(M5.Display.getRotation() ^ 1);
   }
+  M5.setLogDisplayIndex(0);
 
   unifiedButton.begin(&M5.Display,
                       goblib::UnifiedButton::appearance_t::transparent_all);
@@ -78,15 +84,19 @@ void setup() {
   M5.Speaker.setVolume(16);
   M5.Speaker.setChannelVolume(0, 64);
   M5.Speaker.begin();
-  M5.Display.println((M5.Speaker.isEnabled()) ? "Speaker initialized"
-                                              : "Speaker not found");
+  if (M5.Speaker.isEnabled()) {
+    M5_LOGI("%s", "Speaker initialized");
+  } else {
+    M5_LOGE("%s", "Speaker not found");
+    delay(1000);
+  }
 
   TaskHandle_t pipoTaskHandle;
   xTaskCreatePinnedToCore((TaskFunction_t)pipoTask, "pipoTask",
                           configMINIMAL_STACK_SIZE, nullptr, 2, &pipoTaskHandle,
                           APP_CPU_NUM);
   if (pipoTaskHandle == NULL) { // Task creation failed
-    M5.Display.println("pipo task failed.");
+    M5_LOGE("%s", "pipoTask failed.");
   }
 
   DXL_SERIAL.begin(DXL_BAUD, SERIAL_8N1, DXL_RX_PIN, DXL_TX_PIN);
