@@ -1,12 +1,10 @@
 #include <Avatar.h>
 #include <M5Unified.h>
 #include <functional>
-#include <gob_unifiedButton.hpp>
 
 #include "scpi_handlers.h"
 #include "servo_controller.h"
 
-goblib::UnifiedButton unifiedButton;
 
 // Stackchan RT
 #define DXL_RX_PIN 6
@@ -43,7 +41,6 @@ static void *pipoTask(void *) {
 
 static inline void loop_template(std::function<void(void)> func) {
   M5.update();
-  unifiedButton.update();
   // M5_Log_async_update();
 
   func();
@@ -71,15 +68,14 @@ void setup() {
 
   M5.Display.setEpdMode(epd_mode_t::epd_fastest);
   M5.Display.setTextWrap(true);
-  M5.Display.setTextSize(2);
+  M5.Display.setTextSize(1);
   if (M5.Display.width() < M5.Display.height()) {
     /// Landscape mode.
     M5.Display.setRotation(M5.Display.getRotation() ^ 1);
   }
   M5.setLogDisplayIndex(0);
 
-  unifiedButton.begin(&M5.Display,
-                      goblib::UnifiedButton::appearance_t::transparent_all);
+  M5.setTouchButtonHeight(100);
 
   // M5.In_I2C.release();
 
