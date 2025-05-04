@@ -1,5 +1,6 @@
 #include <Avatar.h>
 #include <M5Unified.h>
+#include <functional>
 #include <gob_unifiedButton.hpp>
 
 #include "scpi_handlers.h"
@@ -27,14 +28,25 @@ static void *pipoTask(void *) {
   {
     M5.Mic.end();
     M5.Speaker.begin();
-    M5.Speaker.tone(2000, 500);
+    M5.Speaker.tone(2000, 100);
     M5.delay(100);
-    M5.Speaker.tone(1000, 500);
+    M5.Speaker.tone(1000, 100);
     M5.delay(100);
-    M5.Speaker.stop();
+    // Do not call M5.Speaker.end() here. This cause crash..
   }
   vTaskDelete(nullptr);
   return nullptr;
+}
+
+static inline void loop_template(std::function<void(void)> func) {
+  M5.update();
+  unifiedButton.update();
+  //M5_Log_async_update();
+
+  func();
+
+  processSCPI();
+  servo_controller.update();
 }
 
 void setup() {
@@ -94,7 +106,7 @@ void setup() {
   TaskHandle_t pipoTaskHandle;
   xTaskCreatePinnedToCore((TaskFunction_t)pipoTask, "pipoTask",
                           configMINIMAL_STACK_SIZE, nullptr, 2, &pipoTaskHandle,
-                          APP_CPU_NUM);
+                          xPortGetCoreID());
   if (pipoTaskHandle == NULL) { // Task creation failed
     M5_LOGE("%s", "pipoTask failed.");
   }
@@ -105,15 +117,13 @@ void setup() {
 
   avatar.init();
   avatar.setBatteryIcon(true);
+
+  M5.Speaker.end();
 }
 
 void loop() {
-  M5.update();
-  unifiedButton.update();
-
-  // TODO
-
-  processSCPI();
-  servo_controller.update();
-  delay(1);
+  loop_template([](void) {
+    // TODO
+  });
+  M5.delay(1);
 }
