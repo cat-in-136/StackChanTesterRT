@@ -113,8 +113,10 @@ static void create_menu_screen() {
   lv_obj_align(container, LV_ALIGN_CENTER, 0, 10);
   lv_obj_set_layout(container, LV_LAYOUT_FLEX);
   lv_obj_set_flex_flow(container, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_flex_align(container, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+  lv_obj_set_flex_align(container, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
                         LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_scroll_dir(container, LV_DIR_VER);
+  lv_obj_set_scrollbar_mode(container, LV_SCROLLBAR_MODE_OFF);
 
   add_menu_button(container, "Adjust", OperationMode::Adjust);
   add_menu_button(container, "Servo Test", OperationMode::TestServo);
