@@ -1,10 +1,9 @@
 #include <Avatar.h>
 #include <M5Unified.h>
-#include <functional>
+#include <lvgl.h>
 
 #include "scpi_handlers.h"
 #include "servo_controller.h"
-
 
 // Stackchan RT
 #define DXL_RX_PIN 6
@@ -12,11 +11,167 @@
 #define DXL_BAUD 1000000
 static HardwareSerial &DXL_SERIAL = Serial1;
 
-enum OperationMode { Idle = 0, Adjust, TestSurvo, Random, MaxOperationMode };
+#define TFT_HOR_RES 320
+#define TFT_VER_RES 240
+
+enum OperationMode { Idle = 0, Menu, Adjust, TestServo, Random };
 
 OperationMode op_mode = OperationMode::Idle;
 m5avatar::Avatar avatar;
 ServoController servo_controller(DXL_SERIAL);
+
+/* LVGL v9 menu screen */
+static lv_obj_t *menu_screen = nullptr;
+
+static uint32_t
+    draw_buf[TFT_HOR_RES * TFT_VER_RES / 10 * (LV_COLOR_DEPTH / 8) / 4];
+
+static void my_disp_flush(lv_display_t *disp, const lv_area_t *area,
+                          uint8_t *px_map) {
+  uint32_t width = (area->x2 - area->x1 + 1);
+  uint32_t height = (area->y2 - area->y1 + 1);
+  lv_draw_sw_rgb565_swap(px_map, width * height);
+  M5.Display.pushImageDMA<uint16_t>(area->x1, area->y1, width, height,
+                                    (uint16_t *)px_map);
+  lv_display_flush_ready(disp);
+}
+
+static void my_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data) {
+  lgfx::touch_point_t tp;
+  if (M5.Display.getTouch(&tp)) {
+    data->state = LV_INDEV_STATE_PRESSED;
+    data->point.x = tp.x;
+    data->point.y = tp.y;
+  } else {
+    data->state = LV_INDEV_STATE_RELEASED;
+  }
+}
+
+static uint32_t my_tick(void) { return millis(); }
+
+/* The Avatar library redraws the screen from its own background task
+ * (drawLoop). It can NEVER run concurrently with LVGL on the shared display
+ * bus. Instead of suspend/resume (vTaskSuspend can freeze the task in the
+ * middle of an SPI transaction), we fully stop the task and wait for it to
+ * exit before LVGL is allowed to flush, and (re)start it only while LVGL is
+ * dormant. */
+static bool avatar_task_active = false;
+
+static void avatarTaskStopAndWait() {
+  if (!avatar_task_active) {
+    return;
+  }
+  avatar.stop();
+  vTaskDelay(80 /
+             portTICK_PERIOD_MS); // let drawLoop finish current frame & exit
+  M5.Display.waitDisplay();
+  avatar_task_active = false;
+}
+
+static void avatarTaskStart() {
+  if (avatar_task_active) {
+    return;
+  }
+  M5.Display.waitDisplay();
+  avatar.start();
+  avatar_task_active = true;
+}
+
+/* Mode transition support. The screen ownership switches between the Avatar
+ * task (LGFX direct draw) and LVGL: they can never run concurrently on the
+ * shared display bus. All mode changes go through changeOperationMode() so the
+ * crossing into/out of an LVGL mode is handled in one place. */
+static void menu_item_cb(lv_event_t *e);
+
+static lv_obj_t *add_menu_button(lv_obj_t *parent, const char *text,
+                                 OperationMode mode) {
+  lv_obj_t *btn = lv_button_create(parent);
+  lv_obj_set_width(btn, 240);
+  lv_obj_set_height(btn, 64);
+  lv_obj_t *label = lv_label_create(btn);
+  lv_label_set_text(label, text);
+  lv_obj_center(label);
+  lv_obj_set_user_data(btn, (void *)(intptr_t)mode);
+  lv_obj_add_event_cb(btn, menu_item_cb, LV_EVENT_CLICKED, NULL);
+  return btn;
+}
+
+static void create_menu_screen() {
+  if (menu_screen != nullptr) {
+    lv_obj_delete(menu_screen);
+  }
+  menu_screen = lv_obj_create(NULL);
+
+  lv_obj_t *title = lv_label_create(menu_screen);
+  lv_label_set_text(title, "StackChanTesterRT Menu");
+  lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_width(title, TFT_HOR_RES - 40);
+  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
+
+  lv_obj_t *container = lv_obj_create(menu_screen);
+  lv_obj_set_size(container, TFT_HOR_RES - 40, 180);
+  lv_obj_align(container, LV_ALIGN_CENTER, 0, 10);
+  lv_obj_set_layout(container, LV_LAYOUT_FLEX);
+  lv_obj_set_flex_flow(container, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(container, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+
+  add_menu_button(container, "Adjust", OperationMode::Adjust);
+  add_menu_button(container, "Servo Test", OperationMode::TestServo);
+  add_menu_button(container, "Random", OperationMode::Random);
+  add_menu_button(container, "Back", OperationMode::Idle);
+}
+
+/* A mode is an "LVGL mode" if its screen is rendered by LVGL instead of the
+ * Avatar task. Add new LVGL screens here. */
+static bool isLVGLMode(OperationMode mode) {
+  switch (mode) {
+  case OperationMode::Menu:
+    return true;
+  default:
+    return false;
+  }
+}
+
+/* Create and load the LVGL screen for the given mode. */
+static void loadLVGLScreen(OperationMode mode) {
+  switch (mode) {
+  case OperationMode::Menu:
+    create_menu_screen();
+    lv_screen_load(menu_screen);
+    break;
+  default:
+    break;
+  }
+}
+
+/* Central mode transition: detects crossing into/out of an LVGL mode and does
+ * the equivalent enterLVGL/leaveLVGL work internally.
+ *  - entering an LVGL mode: fully stop the Avatar task and load the target
+ *    screen, so no Avatar frame can race a subsequent LVGL flush.
+ *  - leaving an LVGL mode: only op_mode is updated here; the Avatar task is
+ *    (re)started by the exclusive-ownership gate in loop() once LVGL has
+ *    fully stopped rendering (menu_item_cb runs inside lv_timer_handler). */
+static void changeOperationMode(OperationMode new_mode) {
+  if (new_mode == op_mode) {
+    return;
+  }
+
+  if (isLVGLMode(new_mode)) {
+    avatarTaskStopAndWait();
+    loadLVGLScreen(new_mode);
+  }
+
+  op_mode = new_mode;
+}
+
+static void menu_item_cb(lv_event_t *e) {
+  if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+    return;
+  }
+  intptr_t mode = (intptr_t)lv_event_get_user_data(e);
+  changeOperationMode((OperationMode)mode);
+}
 
 /**
  * @brief Task function for playing a NEC-PC-98-like PiPo sound using the
@@ -37,16 +192,6 @@ static void *pipoTask(void *) {
   }
   vTaskDelete(nullptr);
   return nullptr;
-}
-
-static inline void loop_template(std::function<void(void)> func) {
-  M5.update();
-  // M5_Log_async_update();
-
-  func();
-
-  processSCPI();
-  servo_controller.update();
 }
 
 void setup() {
@@ -76,8 +221,6 @@ void setup() {
   M5.setLogDisplayIndex(0);
 
   M5.setTouchButtonHeight(100);
-
-  // M5.In_I2C.release();
 
   { /// custom setting
     auto spk_cfg = M5.Speaker.config();
@@ -114,8 +257,31 @@ void setup() {
   delay(1000);
   servo_controller.begin();
 
-  avatar.init();
+  // NOTE: do NOT call avatar.init()/start() here. The Avatar task must stay
+  // stopped while the LVGL menu owns the screen at boot.
+
   avatar.setBatteryIcon(true);
+  avatar.setBatteryStatus(M5.Power.isCharging(), M5.Power.getBatteryLevel());
+
+  /* LVGL v9 (used for the idle menu screen) */
+  lv_init();
+  lv_tick_set_cb(my_tick);
+#if LV_USE_LOG != 0
+  lv_log_register_print_cb([](lv_log_level_t level, const char *buf) {
+    LV_UNUSED(level);
+    Serial.println(buf);
+    Serial.flush();
+  });
+#endif
+  lv_display_t *disp = lv_display_create(TFT_HOR_RES, TFT_VER_RES);
+  lv_display_set_flush_cb(disp, my_disp_flush);
+  lv_display_set_buffers(disp, draw_buf, nullptr, sizeof(draw_buf),
+                         LV_DISPLAY_RENDER_MODE_PARTIAL);
+  lv_indev_t *indev = lv_indev_create();
+  lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
+  lv_indev_set_read_cb(indev, my_touchpad_read);
+
+  changeOperationMode(OperationMode::Menu);
 
   M5.Speaker.end();
 }
@@ -123,13 +289,14 @@ void setup() {
 static void loopIdle() {
   if (M5.BtnA.wasDoubleClicked()) {
     servo_controller.moveXY(0, 0);
-    op_mode = OperationMode::Adjust;
+    changeOperationMode(OperationMode::Adjust);
   } else if (M5.BtnA.wasSingleClicked()) {
-    servo_controller.moveXY(0, 0);
+    /* Open the LVGL v9 menu screen to choose a mode */
+    changeOperationMode(OperationMode::Menu);
   } else if (M5.BtnB.wasSingleClicked()) {
-    op_mode = OperationMode::TestSurvo;
+    changeOperationMode(OperationMode::TestServo);
   } else if (M5.BtnC.wasSingleClicked()) {
-    op_mode = OperationMode::Random;
+    changeOperationMode(OperationMode::Random);
   }
 
   // random mouth and lyrics
@@ -138,8 +305,8 @@ static void loopIdle() {
     static const uint16_t mouth_open_time = 200;
     static unsigned long last_mouth_millis = 0;
 
-    static const char *lyrics[] = {"BtnA:ResetMove ", "BtnB:ServoTest  ",
-                                   "BtnC:RandomMode  ", "BtnA x2:AdjustMode "};
+    static const char *lyrics[] = {"BtnA:Menu    ", "BtnB:ServoTest ",
+                                   "BtnC:Random    ", "BtnA x2:Adjust "};
     static const size_t lyrics_size = sizeof(lyrics) / sizeof(lyrics[0]);
     static uint_fast8_t lyrics_idx = 0;
 
@@ -172,7 +339,7 @@ static void loopTestServo() {
     if (step >= 10) {
       step = 0;
       avatar.setSpeechText("");
-      op_mode = OperationMode::Idle;
+      changeOperationMode(OperationMode::Idle);
       return;
     } else if (step % 5 == 0) {
       avatar.setSpeechText("X   0 -> -90 ");
@@ -219,7 +386,7 @@ static void loopAdjust() {
     }
   }
   if (M5.BtnB.wasDoubleClicked()) {
-    op_mode = OperationMode::Idle;
+    changeOperationMode(OperationMode::Idle);
     adjust_mode = adjust_mode_t::Init;
     avatar.setSpeechText("");
     return;
@@ -271,7 +438,7 @@ static void loopRandom() {
   if (M5.BtnC.wasDoubleClicked()) {
     avatar.setBatteryIcon(false);
   } else if (M5.BtnC.wasSingleClicked()) {
-    op_mode = OperationMode::Idle;
+    changeOperationMode(OperationMode::Idle);
     avatar.setBatteryIcon(true);
     return;
   }
@@ -306,17 +473,44 @@ static void loopRandom() {
   }
 }
 
+static void loopMenu() {
+  /* Let LVGL render the menu screen */
+  lv_timer_handler();
+}
+
 void loop() {
-  loop_template([](void) {
-    if (op_mode == OperationMode::Idle) {
-      loopIdle();
-    } else if (op_mode == OperationMode::Adjust) {
-      loopAdjust();
-    } else if (op_mode == OperationMode::TestSurvo) {
-      loopTestServo();
-    } else if (op_mode == OperationMode::Random) {
-      loopRandom();
-    }
-  });
+  M5.update();
+  // M5_Log_async_update();
+
+  /* Exclusive display ownership: the Avatar task and LVGL must never run
+   * concurrently. The Menu mode is the only LVGL mode; every other mode owns
+   * the screen via the Avatar task. */
+  if (op_mode == OperationMode::Menu) {
+    avatarTaskStopAndWait();
+  } else {
+    avatarTaskStart();
+  }
+
+  switch (op_mode) {
+  case OperationMode::Idle:
+    loopIdle();
+    break;
+  case OperationMode::Menu:
+    loopMenu();
+    break;
+  case OperationMode::Adjust:
+    loopAdjust();
+    break;
+  case OperationMode::TestServo:
+    loopTestServo();
+    break;
+  case OperationMode::Random:
+    loopRandom();
+    break;
+  }
+
+  processSCPI();
+  servo_controller.update();
+
   M5.delay(1);
 }
