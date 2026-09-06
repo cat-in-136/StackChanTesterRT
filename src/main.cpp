@@ -183,10 +183,10 @@ static void create_adjust_row(lv_obj_t *parent, bool is_x, lv_coord_t y) {
     adjust_y_value_label = label;
   }
 
-  add_adjust_step_button(parent, "-",
-                         is_x ? AdjustActXMinus : AdjustActYMinus, 200, y);
-  add_adjust_step_button(parent, "+",
-                         is_x ? AdjustActXPlus : AdjustActYPlus, 256, y);
+  add_adjust_step_button(parent, "-", is_x ? AdjustActXMinus : AdjustActYMinus,
+                         200, y);
+  add_adjust_step_button(parent, "+", is_x ? AdjustActXPlus : AdjustActYPlus,
+                         256, y);
 }
 
 static void create_adjust_screen() {
@@ -301,9 +301,8 @@ static void adjust_btn_cb(lv_event_t *e) {
   const auto action = (AdjustAction)(intptr_t)lv_event_get_user_data(e);
   if (action == AdjustActXMinus || action == AdjustActXPlus ||
       action == AdjustActYMinus || action == AdjustActYPlus) {
-    const int delta = (action == AdjustActXPlus || action == AdjustActYPlus)
-                          ? 1
-                          : -1;
+    const int delta =
+        (action == AdjustActXPlus || action == AdjustActYPlus) ? 1 : -1;
     if (action == AdjustActXMinus || action == AdjustActXPlus) {
       servo_controller.setServoOffsetX(servo_controller.getServoOffsetX() +
                                        delta);
@@ -435,7 +434,7 @@ static void loopIdle() {
   if (M5.BtnA.wasDoubleClicked()) {
     servo_controller.moveXY(0, 0);
   } else if (M5.BtnA.wasSingleClicked() || M5.BtnB.wasSingleClicked() ||
-             M5.BtnC.wasSingleClicked()) {
+             M5.BtnC.wasSingleClicked() || M5.BtnPWR.wasClicked()) {
     /* Open the LVGL v9 menu screen to choose a mode */
     changeOperationMode(OperationMode::Menu);
   }
@@ -447,7 +446,7 @@ static void loopIdle() {
 static void loopTestServo() {
   static uint8_t step = 0;
 
-  if (M5.BtnB.wasPressed()) {
+  if (M5.BtnPWR.wasClicked()) {
     avatar.setSpeechText("Stop Test Servo...");
     servo_controller.moveXY(0, 0);
     step = 100; // force quit
@@ -491,9 +490,9 @@ static void loopAdjust() {
 static void loopRandom() {
   static unsigned long last_action_millis = 0;
 
-  if (M5.BtnC.wasDoubleClicked()) {
+  if (M5.BtnC.wasSingleClicked()) {
     avatar.setBatteryIcon(false);
-  } else if (M5.BtnC.wasSingleClicked()) {
+  } else if (M5.BtnA.wasReleasedAfterHold() || M5.BtnPWR.wasClicked()) {
     changeOperationMode(OperationMode::Menu);
     avatar.setBatteryIcon(true);
     return;
