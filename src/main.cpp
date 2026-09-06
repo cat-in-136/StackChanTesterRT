@@ -144,7 +144,6 @@ static void create_menu_screen() {
 
   add_menu_button(container, "Idle", OperationMode::Idle);
   add_menu_button(container, "Position", OperationMode::Position);
-  add_menu_button(container, "Adjust", OperationMode::Adjust);
   add_menu_button(container, "Servo Test", OperationMode::TestServo);
   add_menu_button(container, "Random", OperationMode::Random);
 }
@@ -157,11 +156,12 @@ enum AdjustAction {
   AdjustActXMinus = 0,
   AdjustActXPlus,
   AdjustActYMinus,
-  AdjustActYPlus,
-  AdjustActBack
+  AdjustActYPlus
 };
 
 static void adjust_btn_cb(lv_event_t *e);
+static void adjust_back_cb(lv_event_t *e);
+static void changeOperationMode(OperationMode new_mode);
 
 static void adjust_update_labels() {
   lv_label_set_text_fmt(adjust_x_value_label, "X:%d",
@@ -215,19 +215,24 @@ static void create_adjust_screen() {
   lv_obj_set_size(title, TFT_HOR_RES - 40, LV_SIZE_CONTENT);
   lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 14);
 
+  lv_obj_t *back = lv_button_create(adjust_screen);
+  lv_obj_set_size(back, 40, 32);
+  lv_obj_align(back, LV_ALIGN_TOP_LEFT, 8, 8);
+  lv_obj_t *back_label = lv_label_create(back);
+  lv_label_set_text(back_label, "<-");
+  lv_obj_center(back_label);
+  lv_obj_add_event_cb(back, adjust_back_cb, LV_EVENT_CLICKED, nullptr);
+
   create_adjust_row(adjust_screen, true, 56);
   create_adjust_row(adjust_screen, false, 120);
 
-  lv_obj_t *back = lv_button_create(adjust_screen);
-  lv_obj_set_size(back, 280, 40);
-  lv_obj_align(back, LV_ALIGN_BOTTOM_MID, 0, -12);
-  lv_obj_t *back_label = lv_label_create(back);
-  lv_label_set_text(back_label, "Back to Menu");
-  lv_obj_center(back_label);
-  lv_obj_add_event_cb(back, adjust_btn_cb, LV_EVENT_CLICKED,
-                      (void *)(intptr_t)AdjustActBack);
-
   adjust_update_labels();
+}
+
+static void adjust_back_cb(lv_event_t *e) {
+  if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+    changeOperationMode(OperationMode::Position);
+  }
 }
 
 /* A mode is an "LVGL mode" if its screen is rendered by LVGL instead of the
@@ -249,6 +254,7 @@ static lv_obj_t *position_screen = nullptr;
 static void position_back_cb(lv_event_t *e);
 static void position_reset_cb(lv_event_t *e);
 static void position_torqueoff_cb(lv_event_t *e);
+static void position_adjust_cb(lv_event_t *e);
 static void create_position_screen();
 static void changeOperationMode(OperationMode new_mode);
 
@@ -264,28 +270,56 @@ static void create_position_screen() {
   lv_obj_set_width(title, TFT_HOR_RES - 40);
   lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
 
-  lv_obj_t *reset_btn = lv_button_create(position_screen);
+  lv_obj_t *container = lv_obj_create(position_screen);
+  lv_obj_set_size(container, TFT_HOR_RES - 40, 180);
+  lv_obj_align(container, LV_ALIGN_CENTER, 0, 10);
+  lv_obj_set_layout(container, LV_LAYOUT_FLEX);
+  lv_obj_set_flex_flow(container, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(container, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER,
+                        LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_scroll_dir(container, LV_DIR_VER);
+  lv_obj_set_scrollbar_mode(container, LV_SCROLLBAR_MODE_OFF);
+
+  lv_obj_t *pos_label = lv_label_create(container);
+  lv_label_set_text(pos_label, "Position");
+  lv_obj_set_style_text_align(pos_label, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_width(pos_label, TFT_HOR_RES - 40);
+  lv_obj_set_style_text_color(pos_label, lv_palette_main(LV_PALETTE_BLUE), 0);
+
+  lv_obj_t *reset_btn = lv_button_create(container);
   lv_obj_set_size(reset_btn, 240, 64);
-  lv_obj_align(reset_btn, LV_ALIGN_CENTER, 0, -40);
   lv_obj_t *reset_label = lv_label_create(reset_btn);
   lv_label_set_text(reset_label, "Reset");
   lv_obj_center(reset_label);
   lv_obj_add_event_cb(reset_btn, position_reset_cb, LV_EVENT_CLICKED, nullptr);
 
-  lv_obj_t *torqueoff_btn = lv_button_create(position_screen);
+  lv_obj_t *torqueoff_btn = lv_button_create(container);
   lv_obj_set_size(torqueoff_btn, 240, 64);
-  lv_obj_align(torqueoff_btn, LV_ALIGN_CENTER, 0, 36);
   lv_obj_t *torqueoff_label = lv_label_create(torqueoff_btn);
   lv_label_set_text(torqueoff_label, "TorqueOff");
   lv_obj_center(torqueoff_label);
   lv_obj_add_event_cb(torqueoff_btn, position_torqueoff_cb, LV_EVENT_CLICKED,
                       nullptr);
 
+  lv_obj_t *set_label = lv_label_create(container);
+  lv_label_set_text(set_label, "Settings");
+  lv_obj_set_style_text_align(set_label, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_width(set_label, TFT_HOR_RES - 40);
+  lv_obj_set_style_text_color(set_label, lv_palette_main(LV_PALETTE_BLUE), 0);
+
+  lv_obj_t *adjust_btn = lv_button_create(container);
+  lv_obj_set_size(adjust_btn, 240, 64);
+  lv_obj_t *adjust_label = lv_label_create(adjust_btn);
+  lv_label_set_text(adjust_label, "Adjust");
+  lv_obj_center(adjust_label);
+  lv_obj_add_event_cb(adjust_btn, position_adjust_cb, LV_EVENT_CLICKED,
+                      nullptr);
+
   lv_obj_t *back = lv_button_create(position_screen);
-  lv_obj_set_size(back, 280, 40);
-  lv_obj_align(back, LV_ALIGN_BOTTOM_MID, 0, -8);
+  lv_obj_set_size(back, 40, 32);
+  lv_obj_align(back, LV_ALIGN_TOP_LEFT, 8, 8);
   lv_obj_t *back_label = lv_label_create(back);
-  lv_label_set_text(back_label, "Back to Menu");
+  lv_label_set_text(back_label, "<-");
   lv_obj_center(back_label);
   lv_obj_add_event_cb(back, position_back_cb, LV_EVENT_CLICKED, nullptr);
 }
@@ -307,6 +341,12 @@ static void position_torqueoff_cb(lv_event_t *e) {
 static void position_back_cb(lv_event_t *e) {
   if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
     changeOperationMode(OperationMode::Menu);
+  }
+}
+
+static void position_adjust_cb(lv_event_t *e) {
+  if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+    changeOperationMode(OperationMode::Adjust);
   }
 }
 
@@ -397,8 +437,6 @@ static void adjust_btn_cb(lv_event_t *e) {
     }
     servo_controller.moveXY(0, 0);
     adjust_update_labels();
-  } else if (action == AdjustActBack) {
-    changeOperationMode(OperationMode::Menu);
   }
 }
 
