@@ -27,6 +27,9 @@ public:
   bool isMoving();
   void waitForAllServosToStop();
 
+  void torqueOff();
+  void torqueOn();
+
 private:
   HardwareSerial &serial;
   Dynamixel2Arduino dxl;

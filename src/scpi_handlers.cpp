@@ -1,9 +1,12 @@
 #include "scpi_handlers.h"
 
+#include "servo_controller.h"
 #include <M5Unified.h>
 #include <Preferences.h>
 #include <Vrekrer_scpi_parser.h>
 #include <WiFi.h>
+
+extern ServoController servo_controller;
 
 SCPI_Parser scpi;
 
@@ -114,6 +117,16 @@ void setupSCPI(void) {
       });
 
   scpi.SetCommandTreeBase(F(""));
+  scpi.RegisterCommand(F(":TORQ:OFF"), [](SCPI_C commands, SCPI_P parameters,
+                                          Stream &interface) {
+    servo_controller.torqueOff();
+    interface.println(F("OK"));
+  });
+  scpi.RegisterCommand(
+      F(":TORQ:ON"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
+        servo_controller.torqueOn();
+        interface.println(F("OK"));
+      });
   scpi.RegisterCommand(
       F("*IDN?"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
         const uint64_t efuseMac = ESP.getEfuseMac();

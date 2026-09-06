@@ -14,7 +14,15 @@ static HardwareSerial &DXL_SERIAL = Serial1;
 #define TFT_HOR_RES 320
 #define TFT_VER_RES 240
 
-enum OperationMode { Idle = 0, Menu, Adjust, TestServo, Random };
+enum OperationMode {
+  Idle = 0,
+  Menu,
+  Position,
+  Adjust,
+  TestServo,
+  Random,
+  TorqueOff
+};
 
 OperationMode op_mode = OperationMode::Idle;
 m5avatar::Avatar avatar;
@@ -83,6 +91,11 @@ static void avatarTaskStart() {
   }
   M5.Display.waitDisplay();
   avatar.start();
+  // Reset the expression when (re)starting the Avatar task. This is the only
+  // safe place for it: Avatar::setExpression() -> suspend() ->
+  // vTaskSuspend(drawTaskHandle) treats a NULL handle as "suspend the current
+  // task", so it must never run while the Avatar task is stopped/never started.
+  avatar.setExpression(m5avatar::Expression::Neutral);
   avatar_task_active = true;
 }
 
@@ -130,6 +143,7 @@ static void create_menu_screen() {
   lv_obj_set_scrollbar_mode(container, LV_SCROLLBAR_MODE_OFF);
 
   add_menu_button(container, "Idle", OperationMode::Idle);
+  add_menu_button(container, "Position", OperationMode::Position);
   add_menu_button(container, "Adjust", OperationMode::Adjust);
   add_menu_button(container, "Servo Test", OperationMode::TestServo);
   add_menu_button(container, "Random", OperationMode::Random);
@@ -221,6 +235,7 @@ static void create_adjust_screen() {
 static bool isLVGLMode(OperationMode mode) {
   switch (mode) {
   case OperationMode::Menu:
+  case OperationMode::Position:
   case OperationMode::Adjust:
     return true;
   default:
@@ -229,11 +244,81 @@ static bool isLVGLMode(OperationMode mode) {
 }
 
 /* Create and load the LVGL screen for the given mode. */
+static lv_obj_t *position_screen = nullptr;
+
+static void position_back_cb(lv_event_t *e);
+static void position_reset_cb(lv_event_t *e);
+static void position_torqueoff_cb(lv_event_t *e);
+static void create_position_screen();
+static void changeOperationMode(OperationMode new_mode);
+
+static void create_position_screen() {
+  if (position_screen != nullptr) {
+    lv_obj_delete(position_screen);
+  }
+  position_screen = lv_obj_create(NULL);
+
+  lv_obj_t *title = lv_label_create(position_screen);
+  lv_label_set_text(title, "Position");
+  lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_width(title, TFT_HOR_RES - 40);
+  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 20);
+
+  lv_obj_t *reset_btn = lv_button_create(position_screen);
+  lv_obj_set_size(reset_btn, 240, 64);
+  lv_obj_align(reset_btn, LV_ALIGN_CENTER, 0, -40);
+  lv_obj_t *reset_label = lv_label_create(reset_btn);
+  lv_label_set_text(reset_label, "Reset");
+  lv_obj_center(reset_label);
+  lv_obj_add_event_cb(reset_btn, position_reset_cb, LV_EVENT_CLICKED, nullptr);
+
+  lv_obj_t *torqueoff_btn = lv_button_create(position_screen);
+  lv_obj_set_size(torqueoff_btn, 240, 64);
+  lv_obj_align(torqueoff_btn, LV_ALIGN_CENTER, 0, 36);
+  lv_obj_t *torqueoff_label = lv_label_create(torqueoff_btn);
+  lv_label_set_text(torqueoff_label, "TorqueOff");
+  lv_obj_center(torqueoff_label);
+  lv_obj_add_event_cb(torqueoff_btn, position_torqueoff_cb, LV_EVENT_CLICKED,
+                      nullptr);
+
+  lv_obj_t *back = lv_button_create(position_screen);
+  lv_obj_set_size(back, 280, 40);
+  lv_obj_align(back, LV_ALIGN_BOTTOM_MID, 0, -8);
+  lv_obj_t *back_label = lv_label_create(back);
+  lv_label_set_text(back_label, "Back to Menu");
+  lv_obj_center(back_label);
+  lv_obj_add_event_cb(back, position_back_cb, LV_EVENT_CLICKED, nullptr);
+}
+
+static void position_reset_cb(lv_event_t *e) {
+  if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+    servo_controller.moveXY(0, 0);
+    M5.delay(100);
+    servo_controller.waitForAllServosToStop();
+  }
+}
+
+static void position_torqueoff_cb(lv_event_t *e) {
+  if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+    changeOperationMode(OperationMode::TorqueOff);
+  }
+}
+
+static void position_back_cb(lv_event_t *e) {
+  if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+    changeOperationMode(OperationMode::Menu);
+  }
+}
+
 static void loadLVGLScreen(OperationMode mode) {
   switch (mode) {
   case OperationMode::Menu:
     create_menu_screen();
     lv_screen_load(menu_screen);
+    break;
+  case OperationMode::Position:
+    create_position_screen();
+    lv_screen_load(position_screen);
     break;
   case OperationMode::Adjust:
     create_adjust_screen();
@@ -528,10 +613,31 @@ static void loopRandom() {
   }
 }
 
+static void loopTorqueOff() {
+  static bool torque_off_done = false;
+
+  if (M5.BtnPWR.wasClicked() || M5.BtnA.wasReleased() ||
+      M5.BtnB.wasReleased() || M5.BtnC.wasReleased()) {
+    servo_controller.torqueOn();
+    torque_off_done = false;
+    changeOperationMode((M5.BtnPWR.wasClicked()) ? OperationMode::Menu
+                                                 : OperationMode::Position);
+    return;
+  }
+
+  if (!torque_off_done) {
+    servo_controller.torqueOff();
+    torque_off_done = true;
+    avatar.setExpression(m5avatar::Expression::Sleepy);
+  }
+}
+
 static void loopMenu() {
   /* Let LVGL render the menu screen */
   lv_timer_handler();
 }
+
+static void loopPosition() { lv_timer_handler(); }
 
 void loop() {
   M5.update();
@@ -544,6 +650,9 @@ void loop() {
   case OperationMode::Menu:
     loopMenu();
     break;
+  case OperationMode::Position:
+    loopPosition();
+    break;
   case OperationMode::Adjust:
     loopAdjust();
     break;
@@ -552,6 +661,9 @@ void loop() {
     break;
   case OperationMode::Random:
     loopRandom();
+    break;
+  case OperationMode::TorqueOff:
+    loopTorqueOff();
     break;
   }
 

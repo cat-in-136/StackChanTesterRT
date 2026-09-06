@@ -110,3 +110,15 @@ void ServoController::waitForAllServosToStop() {
     delay(10);
   }
 }
+
+void ServoController::torqueOff() {
+  dxl.torqueOff(id_x);
+  dxl.torqueOff(id_y);
+  M5_LOGI("Torque OFF");
+}
+
+void ServoController::torqueOn() {
+  dxl.torqueOn(id_x);
+  dxl.torqueOn(id_y);
+  M5_LOGI("Torque ON");
+}
