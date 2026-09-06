@@ -91,8 +91,10 @@ static lv_obj_t *add_menu_button(lv_obj_t *parent, const char *text,
   lv_obj_t *label = lv_label_create(btn);
   lv_label_set_text(label, text);
   lv_obj_center(label);
-  lv_obj_set_user_data(btn, (void *)(intptr_t)mode);
-  lv_obj_add_event_cb(btn, menu_item_cb, LV_EVENT_CLICKED, NULL);
+  /* Pass the target mode as the callback user_data: lv_event_get_user_data()
+   * returns the ADD-registered value (lv_event.c:133), not the object's. */
+  lv_obj_add_event_cb(btn, menu_item_cb, LV_EVENT_CLICKED,
+                      (void *)(intptr_t)mode);
   return btn;
 }
 
@@ -118,10 +120,10 @@ static void create_menu_screen() {
   lv_obj_set_scroll_dir(container, LV_DIR_VER);
   lv_obj_set_scrollbar_mode(container, LV_SCROLLBAR_MODE_OFF);
 
+  add_menu_button(container, "Idle", OperationMode::Idle);
   add_menu_button(container, "Adjust", OperationMode::Adjust);
   add_menu_button(container, "Servo Test", OperationMode::TestServo);
   add_menu_button(container, "Random", OperationMode::Random);
-  add_menu_button(container, "Back", OperationMode::Idle);
 }
 
 /* A mode is an "LVGL mode" if its screen is rendered by LVGL instead of the
@@ -147,21 +149,38 @@ static void loadLVGLScreen(OperationMode mode) {
   }
 }
 
+/* Virtual A/B/C touch-button area for the non-LVGL (Avatar) modes. On this
+ * panel the touch buttons cover the full screen, and they are fully disabled
+ * while an LVGL screen owns the display (see changeOperationMode()). */
+static constexpr uint8_t TOUCH_BUTTON_RATIO = 0xFF;
+
 /* Central mode transition: detects crossing into/out of an LVGL mode and does
  * the equivalent enterLVGL/leaveLVGL work internally.
  *  - entering an LVGL mode: fully stop the Avatar task and load the target
- *    screen, so no Avatar frame can race a subsequent LVGL flush.
- *  - leaving an LVGL mode: only op_mode is updated here; the Avatar task is
- *    (re)started by the exclusive-ownership gate in loop() once LVGL has
- *    fully stopped rendering (menu_item_cb runs inside lv_timer_handler). */
+ *    screen, so no Avatar frame can race a subsequent LVGL flush. Also disable
+ *    the virtual A/B/C touch buttons: a tap on a menu item must not double as
+ *    a virtual button press, otherwise loopIdle() reports that click ~500 ms
+ *    later (Button_Class hold threshold) and re-opens the menu.
+ *  - leaving an LVGL mode: restore the virtual touch buttons and (re)start the
+ *    Avatar task. This runs from menu_item_cb inside lv_timer_handler(), so
+ *    LVGL has fully stopped rendering before the Avatar task starts drawing. */
 static void changeOperationMode(OperationMode new_mode) {
   if (new_mode == op_mode) {
     return;
   }
+  M5_LOGD("changeOperationMode: %d -> %d", op_mode, new_mode);
 
-  if (isLVGLMode(new_mode)) {
-    avatarTaskStopAndWait();
-    loadLVGLScreen(new_mode);
+  bool lvgl_mode = isLVGLMode(op_mode);
+  bool new_lvgl_mode = isLVGLMode(new_mode);
+  if (lvgl_mode != new_lvgl_mode) {
+    if (new_lvgl_mode) {
+      M5.setTouchButtonHeight(0);
+      avatarTaskStopAndWait();
+      loadLVGLScreen(new_mode);
+    } else {
+      M5.setTouchButtonHeightByRatio(TOUCH_BUTTON_RATIO);
+      avatarTaskStart();
+    }
   }
 
   op_mode = new_mode;
@@ -171,8 +190,8 @@ static void menu_item_cb(lv_event_t *e) {
   if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
     return;
   }
-  intptr_t mode = (intptr_t)lv_event_get_user_data(e);
-  changeOperationMode((OperationMode)mode);
+  const OperationMode mode = (OperationMode)(intptr_t)lv_event_get_user_data(e);
+  changeOperationMode(mode);
 }
 
 /**
@@ -222,7 +241,7 @@ void setup() {
   }
   M5.setLogDisplayIndex(0);
 
-  M5.setTouchButtonHeight(100);
+  M5.setTouchButtonHeightByRatio(TOUCH_BUTTON_RATIO);
 
   { /// custom setting
     auto spk_cfg = M5.Speaker.config();
@@ -265,7 +284,7 @@ void setup() {
   avatar.setBatteryIcon(true);
   avatar.setBatteryStatus(M5.Power.isCharging(), M5.Power.getBatteryLevel());
 
-  /* LVGL v9 (used for the idle menu screen) */
+  /* LVGL v9 (mode-selection menu screen) */
   lv_init();
   lv_tick_set_cb(my_tick);
 #if LV_USE_LOG != 0
@@ -291,39 +310,14 @@ void setup() {
 static void loopIdle() {
   if (M5.BtnA.wasDoubleClicked()) {
     servo_controller.moveXY(0, 0);
-    changeOperationMode(OperationMode::Adjust);
-  } else if (M5.BtnA.wasSingleClicked()) {
+  } else if (M5.BtnA.wasSingleClicked() || M5.BtnB.wasSingleClicked() ||
+             M5.BtnC.wasSingleClicked()) {
     /* Open the LVGL v9 menu screen to choose a mode */
     changeOperationMode(OperationMode::Menu);
-  } else if (M5.BtnB.wasSingleClicked()) {
-    changeOperationMode(OperationMode::TestServo);
-  } else if (M5.BtnC.wasSingleClicked()) {
-    changeOperationMode(OperationMode::Random);
   }
 
-  // random mouth and lyrics
-  if (op_mode == OperationMode::Idle) {
-    static const uint16_t mouth_wait = 2000;
-    static const uint16_t mouth_open_time = 200;
-    static unsigned long last_mouth_millis = 0;
-
-    static const char *lyrics[] = {"BtnA:Menu    ", "BtnB:ServoTest ",
-                                   "BtnC:Random    ", "BtnA x2:Adjust "};
-    static const size_t lyrics_size = sizeof(lyrics) / sizeof(lyrics[0]);
-    static uint_fast8_t lyrics_idx = 0;
-
-    const unsigned long millis_since_last_mouth = millis() - last_mouth_millis;
-    if (millis_since_last_mouth > mouth_open_time + mouth_wait) {
-      const char *const l = lyrics[lyrics_idx++ % lyrics_size];
-      avatar.setMouthOpenRatio(0.7);
-      avatar.setSpeechText(l);
-      last_mouth_millis = millis();
-    } else if (millis_since_last_mouth > mouth_open_time) {
-      avatar.setMouthOpenRatio(0.0);
-    }
-  } else {
-    avatar.setSpeechText("");
-  }
+  // no random mouth / lyrics while idle
+  avatar.setSpeechText("");
 }
 
 static void loopTestServo() {
@@ -341,7 +335,7 @@ static void loopTestServo() {
     if (step >= 10) {
       step = 0;
       avatar.setSpeechText("");
-      changeOperationMode(OperationMode::Idle);
+      changeOperationMode(OperationMode::Menu);
       return;
     } else if (step % 5 == 0) {
       avatar.setSpeechText("X   0 -> -90 ");
@@ -388,7 +382,7 @@ static void loopAdjust() {
     }
   }
   if (M5.BtnB.wasDoubleClicked()) {
-    changeOperationMode(OperationMode::Idle);
+    changeOperationMode(OperationMode::Menu);
     adjust_mode = adjust_mode_t::Init;
     avatar.setSpeechText("");
     return;
@@ -440,7 +434,7 @@ static void loopRandom() {
   if (M5.BtnC.wasDoubleClicked()) {
     avatar.setBatteryIcon(false);
   } else if (M5.BtnC.wasSingleClicked()) {
-    changeOperationMode(OperationMode::Idle);
+    changeOperationMode(OperationMode::Menu);
     avatar.setBatteryIcon(true);
     return;
   }
@@ -483,15 +477,6 @@ static void loopMenu() {
 void loop() {
   M5.update();
   // M5_Log_async_update();
-
-  /* Exclusive display ownership: the Avatar task and LVGL must never run
-   * concurrently. The Menu mode is the only LVGL mode; every other mode owns
-   * the screen via the Avatar task. */
-  if (op_mode == OperationMode::Menu) {
-    avatarTaskStopAndWait();
-  } else {
-    avatarTaskStart();
-  }
 
   switch (op_mode) {
   case OperationMode::Idle:
