@@ -23,6 +23,11 @@ ServoController servo_controller(DXL_SERIAL);
 /* LVGL v9 menu screen */
 static lv_obj_t *menu_screen = nullptr;
 
+/* LVGL v9 servo adjust screen */
+static lv_obj_t *adjust_screen = nullptr;
+static lv_obj_t *adjust_x_value_label = nullptr;
+static lv_obj_t *adjust_y_value_label = nullptr;
+
 static uint32_t
     draw_buf[TFT_HOR_RES * TFT_VER_RES / 10 * (LV_COLOR_DEPTH / 8) / 4];
 
@@ -37,6 +42,10 @@ static void my_disp_flush(lv_display_t *disp, const lv_area_t *area,
 }
 
 static void my_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data) {
+  /* Feed M5's touch state first, like the LVGLv9 reference sample: this keeps
+   * the GT911 touch controller polling fresh so LVGL sees clean press/release
+   * transitions. */
+  M5.update();
   lgfx::touch_point_t tp;
   if (M5.Display.getTouch(&tp)) {
     data->state = LV_INDEV_STATE_PRESSED;
@@ -126,11 +135,93 @@ static void create_menu_screen() {
   add_menu_button(container, "Random", OperationMode::Random);
 }
 
+/* Servo offset adjust screen. One row per axis: the current offset value
+ * followed by "-" / "+" buttons that re-home the servos (matching the old
+ * physical-button behavior of loopAdjust()). The +/- buttons repeat while
+ * held down. "Menu" returns to the menu screen. */
+enum AdjustAction {
+  AdjustActXMinus = 0,
+  AdjustActXPlus,
+  AdjustActYMinus,
+  AdjustActYPlus,
+  AdjustActBack
+};
+
+static void adjust_btn_cb(lv_event_t *e);
+
+static void adjust_update_labels() {
+  lv_label_set_text_fmt(adjust_x_value_label, "X:%d",
+                        (int)servo_controller.getServoOffsetX());
+  lv_label_set_text_fmt(adjust_y_value_label, "Y:%d",
+                        (int)servo_controller.getServoOffsetY());
+}
+
+static lv_obj_t *add_adjust_step_button(lv_obj_t *parent, const char *text,
+                                        AdjustAction action, lv_coord_t x,
+                                        lv_coord_t y) {
+  lv_obj_t *btn = lv_button_create(parent);
+  lv_obj_set_pos(btn, x, y);
+  lv_obj_set_size(btn, 48, 40);
+  lv_obj_t *label = lv_label_create(btn);
+  lv_label_set_text(label, text);
+  lv_obj_center(label);
+  lv_obj_add_event_cb(btn, adjust_btn_cb, LV_EVENT_CLICKED,
+                      (void *)(intptr_t)action);
+  lv_obj_add_event_cb(btn, adjust_btn_cb, LV_EVENT_LONG_PRESSED_REPEAT,
+                      (void *)(intptr_t)action);
+  return btn;
+}
+
+/* One row per axis: value label on the left, "-" / "+" on the right. */
+static void create_adjust_row(lv_obj_t *parent, bool is_x, lv_coord_t y) {
+  lv_obj_t *label = lv_label_create(parent);
+  lv_obj_align(label, LV_ALIGN_TOP_LEFT, 24, y + 10);
+  lv_obj_set_style_text_color(label, lv_color_black(), 0);
+  if (is_x) {
+    adjust_x_value_label = label;
+  } else {
+    adjust_y_value_label = label;
+  }
+
+  add_adjust_step_button(parent, "-",
+                         is_x ? AdjustActXMinus : AdjustActYMinus, 200, y);
+  add_adjust_step_button(parent, "+",
+                         is_x ? AdjustActXPlus : AdjustActYPlus, 256, y);
+}
+
+static void create_adjust_screen() {
+  if (adjust_screen != nullptr) {
+    lv_obj_delete(adjust_screen);
+  }
+  adjust_screen = lv_obj_create(NULL);
+
+  lv_obj_t *title = lv_label_create(adjust_screen);
+  lv_label_set_text(title, "Adjust");
+  lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_size(title, TFT_HOR_RES - 40, LV_SIZE_CONTENT);
+  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 14);
+
+  create_adjust_row(adjust_screen, true, 56);
+  create_adjust_row(adjust_screen, false, 120);
+
+  lv_obj_t *back = lv_button_create(adjust_screen);
+  lv_obj_set_size(back, 280, 40);
+  lv_obj_align(back, LV_ALIGN_BOTTOM_MID, 0, -12);
+  lv_obj_t *back_label = lv_label_create(back);
+  lv_label_set_text(back_label, "Back to Menu");
+  lv_obj_center(back_label);
+  lv_obj_add_event_cb(back, adjust_btn_cb, LV_EVENT_CLICKED,
+                      (void *)(intptr_t)AdjustActBack);
+
+  adjust_update_labels();
+}
+
 /* A mode is an "LVGL mode" if its screen is rendered by LVGL instead of the
  * Avatar task. Add new LVGL screens here. */
 static bool isLVGLMode(OperationMode mode) {
   switch (mode) {
   case OperationMode::Menu:
+  case OperationMode::Adjust:
     return true;
   default:
     return false;
@@ -143,6 +234,10 @@ static void loadLVGLScreen(OperationMode mode) {
   case OperationMode::Menu:
     create_menu_screen();
     lv_screen_load(menu_screen);
+    break;
+  case OperationMode::Adjust:
+    create_adjust_screen();
+    lv_screen_load(adjust_screen);
     break;
   default:
     break;
@@ -176,11 +271,15 @@ static void changeOperationMode(OperationMode new_mode) {
     if (new_lvgl_mode) {
       M5.setTouchButtonHeight(0);
       avatarTaskStopAndWait();
-      loadLVGLScreen(new_mode);
     } else {
       M5.setTouchButtonHeightByRatio(TOUCH_BUTTON_RATIO);
       avatarTaskStart();
     }
+  }
+  /* Load the target screen on every entry into an LVGL mode, or the previous
+   * screen would stay on display for Menu <-> Adjust transitions. */
+  if (new_lvgl_mode) {
+    loadLVGLScreen(new_mode);
   }
 
   op_mode = new_mode;
@@ -192,6 +291,31 @@ static void menu_item_cb(lv_event_t *e) {
   }
   const OperationMode mode = (OperationMode)(intptr_t)lv_event_get_user_data(e);
   changeOperationMode(mode);
+}
+
+static void adjust_btn_cb(lv_event_t *e) {
+  const lv_event_code_t code = lv_event_get_code(e);
+  if (code != LV_EVENT_CLICKED && code != LV_EVENT_LONG_PRESSED_REPEAT) {
+    return;
+  }
+  const auto action = (AdjustAction)(intptr_t)lv_event_get_user_data(e);
+  if (action == AdjustActXMinus || action == AdjustActXPlus ||
+      action == AdjustActYMinus || action == AdjustActYPlus) {
+    const int delta = (action == AdjustActXPlus || action == AdjustActYPlus)
+                          ? 1
+                          : -1;
+    if (action == AdjustActXMinus || action == AdjustActXPlus) {
+      servo_controller.setServoOffsetX(servo_controller.getServoOffsetX() +
+                                       delta);
+    } else {
+      servo_controller.setServoOffsetY(servo_controller.getServoOffsetY() +
+                                       delta);
+    }
+    servo_controller.moveXY(0, 0);
+    adjust_update_labels();
+  } else if (action == AdjustActBack) {
+    changeOperationMode(OperationMode::Menu);
+  }
 }
 
 /**
@@ -360,72 +484,8 @@ static void loopTestServo() {
 }
 
 static void loopAdjust() {
-  static enum adjust_mode_t {
-    Init = 0,
-    AdjustX,
-    AdjustY
-  } adjust_mode = adjust_mode_t::Init;
-
-  if (servo_controller.isMoving()) {
-    return;
-  }
-
-  bool adjust_mode_changed = false;
-  int8_t delta_x = 0;
-  int8_t delta_y = 0;
-
-  if (M5.BtnA.wasPressed()) {
-    if (adjust_mode == adjust_mode_t::AdjustX) {
-      delta_x--;
-    } else if (adjust_mode == adjust_mode_t::AdjustY) {
-      delta_y--;
-    }
-  }
-  if (M5.BtnB.wasDoubleClicked()) {
-    changeOperationMode(OperationMode::Menu);
-    adjust_mode = adjust_mode_t::Init;
-    avatar.setSpeechText("");
-    return;
-  }
-  if (M5.BtnB.wasSingleClicked()) {
-    if (adjust_mode == adjust_mode_t::AdjustX) {
-      adjust_mode = adjust_mode_t::AdjustY;
-      adjust_mode_changed = true;
-    } else if (adjust_mode == adjust_mode_t::AdjustY) {
-      adjust_mode = adjust_mode_t::AdjustX;
-      adjust_mode_changed = true;
-    }
-  }
-  if (M5.BtnC.wasPressed()) {
-    if (adjust_mode == adjust_mode_t::AdjustX) {
-      delta_x++;
-    } else if (adjust_mode == adjust_mode_t::AdjustY) {
-      delta_y++;
-    }
-  }
-  if (adjust_mode == adjust_mode_t::Init) {
-    adjust_mode = adjust_mode_t::AdjustX;
-    adjust_mode_changed = true;
-  }
-
-  if (adjust_mode_changed || delta_x != 0 || delta_y != 0) {
-    char s[64];
-    if (adjust_mode == adjust_mode_t::AdjustX) {
-      const auto servo_offset_x = servo_controller.getServoOffsetX() + delta_x;
-      if (delta_x != 0) {
-        servo_controller.setServoOffsetX(servo_offset_x);
-      }
-      snprintf(s, sizeof(s), "%s:%f:BtnB:X/Y", "X", servo_offset_x);
-    } else if (adjust_mode == adjust_mode_t::AdjustY) {
-      const auto servo_offset_y = servo_controller.getServoOffsetY() + delta_y;
-      if (delta_y != 0) {
-        servo_controller.setServoOffsetY(servo_offset_y);
-      }
-      snprintf(s, sizeof(s), "%s:%f:BtnB:X/Y", "Y", servo_offset_y);
-    }
-    servo_controller.moveXY(0, 0);
-    avatar.setSpeechText(s);
-  }
+  /* Let LVGL render the servo adjust screen (touch-driven) */
+  lv_timer_handler();
 }
 
 static void loopRandom() {
