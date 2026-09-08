@@ -2,6 +2,7 @@
 #include <M5Unified.h>
 #include <lvgl.h>
 
+#include "ble_gatt_cmd.h"
 #include "scpi_handlers.h"
 #include "servo_controller.h"
 
@@ -20,6 +21,7 @@ enum OperationMode {
   Position,
   Adjust,
   TestServo,
+  BleRemote,
   Random,
   TorqueOff
 };
@@ -142,6 +144,7 @@ static void create_menu_screen() {
   lv_obj_set_scroll_dir(container, LV_DIR_VER);
   lv_obj_set_scrollbar_mode(container, LV_SCROLLBAR_MODE_OFF);
 
+  add_menu_button(container, "BLE Remote", OperationMode::BleRemote);
   add_menu_button(container, "Idle", OperationMode::Idle);
   add_menu_button(container, "Position", OperationMode::Position);
   add_menu_button(container, "Servo Test", OperationMode::TestServo);
@@ -392,6 +395,14 @@ static void changeOperationMode(OperationMode new_mode) {
 
   bool lvgl_mode = isLVGLMode(op_mode);
   bool new_lvgl_mode = isLVGLMode(new_mode);
+
+  if (op_mode == OperationMode::BleRemote) {
+    teardownBLE();
+  }
+  if (new_mode == OperationMode::BleRemote) {
+    setupBLE();
+  }
+
   if (lvgl_mode != new_lvgl_mode) {
     if (new_lvgl_mode) {
       M5.setTouchButtonHeight(0);
@@ -401,8 +412,6 @@ static void changeOperationMode(OperationMode new_mode) {
       avatarTaskStart();
     }
   }
-  /* Load the target screen on every entry into an LVGL mode, or the previous
-   * screen would stay on display for Menu <-> Adjust transitions. */
   if (new_lvgl_mode) {
     loadLVGLScreen(new_mode);
   }
@@ -670,6 +679,15 @@ static void loopTorqueOff() {
   }
 }
 
+static void loopBLERemote() {
+  if (M5.BtnPWR.wasClicked() || M5.BtnA.wasReleased() ||
+      M5.BtnB.wasReleased() || M5.BtnC.wasReleased()) {
+    changeOperationMode(OperationMode::Menu);
+    return;
+  }
+  processBLE();
+}
+
 static void loopMenu() {
   /* Let LVGL render the menu screen */
   lv_timer_handler();
@@ -703,6 +721,13 @@ void loop() {
   case OperationMode::TorqueOff:
     loopTorqueOff();
     break;
+  case OperationMode::BleRemote:
+    loopBLERemote();
+    break;
+  }
+  if (op_mode != OperationMode::Menu && menu_screen != nullptr) {
+    lv_obj_delete(menu_screen);
+    menu_screen = nullptr;
   }
 
   processSCPI();
