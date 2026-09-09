@@ -5,6 +5,10 @@
 #define DEFAULT_START_DEGREE_VALUE_X 180
 #define DEFAULT_START_DEGREE_VALUE_Y 180
 
+// StackChan RT canonical coordinate (right-handed, degrees):
+//   X (yaw, ID=1)   : 0 = face-forward, + = left, - = right.
+//   Y (pitch, ID=2) : 0 = face-forward, + = down, - = up.
+// moveXY(0,0) is face-forward; raw Dynamixel goal = logical + offset (180).
 class ServoController {
 public:
   ServoController(HardwareSerial &serial);

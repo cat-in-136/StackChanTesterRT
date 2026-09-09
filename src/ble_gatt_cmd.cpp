@@ -27,10 +27,18 @@ extern ServoController servo_controller;
 #define BLE_FRAG_HEADER_LEN 10
 
 /* ---- Fragment header magic ---- */
-/* Panel "center" pitch (raw units) that maps to device neutral.
- * Position Reset (moveXY(0,0)) is face-forward, i.e. raw 0, while the
- * WebBLE panel sends pitch=150 as "center". */
-#define BLE_PITCH_NEUTRAL 150
+/* M5 StackChan panel compatibility mapping (tenths of a degree):
+ *   M5 yaw   : -1280..1280, 0 = front, + = left.
+ *   M5 pitch : 0..900, 0 = front (down-most), + = up.
+ * StackChan RT canonical (see servo_controller.h):
+ *   RT X (yaw, ID=1)   : degrees, 0 = front, + = left.
+ *   RT Y (pitch, ID=2) : degrees, 0 = front, + = down (inverted vs M5).
+ * Hence: rt_x = m5_yaw / 10, rt_y = -m5_pitch / 10.
+ * M5 home (0,0) maps to RT (0,0) = face-forward. */
+#define BLE_M5_YAW_MIN -1280
+#define BLE_M5_YAW_MAX 1280
+#define BLE_M5_PITCH_MIN 0
+#define BLE_M5_PITCH_MAX 900
 #define FRAG_MAGIC0 0xAA
 #define FRAG_MAGIC1 0x55
 #define FRAG_MAGIC2 0xC3
@@ -252,37 +260,56 @@ static void handleBleMotionData(const char *json, size_t len) {
   if (pitchServo.isNull() && yawServo.isNull())
     return;
 
-  int angle_x = 0, angle_y = 0;
+  // M5 panel sends at most one of angle/rotate per servo (see
+  // MotionDataItem.toJson). RT has no velocity-rotate equivalent here, so a
+  // rotate request moves nothing on that axis instead of being mistaken for
+  // an angle (e.g. rotate=800 must not become 80 deg).
+  bool has_yaw_angle = false, has_pitch_angle = false;
+  int m5_yaw = 0, m5_pitch = 0;
   int speed = 500;
 
   if (!yawServo.isNull()) {
-    angle_x = yawServo["rotate"].isNull() ? yawServo["angle"].as<int>()
-                                          : yawServo["rotate"].as<int>();
-    speed = yawServo["speed"].isNull() ? 500 : yawServo["speed"].as<int>();
+    if (!yawServo["rotate"].isNull() && yawServo["rotate"].as<int>() != 0) {
+      // continuous-rotation request: hold yaw (no-op on RT).
+    } else if (!yawServo["angle"].isNull()) {
+      m5_yaw = yawServo["angle"].as<int>();
+      has_yaw_angle = true;
+    }
+    if (!yawServo["speed"].isNull())
+      speed = yawServo["speed"].as<int>();
   }
   if (!pitchServo.isNull()) {
-    if (!pitchServo["rotate"].isNull()) {
-      angle_y = pitchServo["rotate"].as<int>();
-    } else {
-      angle_y = pitchServo["angle"].as<int>();
+    if (!pitchServo["rotate"].isNull() && pitchServo["rotate"].as<int>() != 0) {
+      // pitch has no rotate mode on M5 either: hold pitch.
+    } else if (!pitchServo["angle"].isNull()) {
+      m5_pitch = pitchServo["angle"].as<int>();
+      has_pitch_angle = true;
     }
     if (!pitchServo["speed"].isNull())
       speed = pitchServo["speed"].as<int>();
   }
+  (void)speed; // RT uses fixed PROFILE_VELOCITY (see ServoController::begin)
 
-  // Align panel center with device neutral (Position Reset = raw 0).
-  angle_y -= BLE_PITCH_NEUTRAL;
+  if (!has_yaw_angle && !has_pitch_angle)
+    return;
 
-  if (angle_x < -1280)
-    angle_x = -1280;
-  if (angle_x > 1280)
-    angle_x = 1280;
-  if (angle_y < -1280)
-    angle_y = -1280;
-  if (angle_y > 1280)
-    angle_y = 1280;
+  // Clamp in M5 panel units before converting (cf. motion.dart sliders:
+  // yaw -1280..1280, pitch 0..900).
+  if (m5_yaw < BLE_M5_YAW_MIN)
+    m5_yaw = BLE_M5_YAW_MIN;
+  if (m5_yaw > BLE_M5_YAW_MAX)
+    m5_yaw = BLE_M5_YAW_MAX;
+  if (m5_pitch < BLE_M5_PITCH_MIN)
+    m5_pitch = BLE_M5_PITCH_MIN;
+  if (m5_pitch > BLE_M5_PITCH_MAX)
+    m5_pitch = BLE_M5_PITCH_MAX;
 
-  servo_controller.moveXY(angle_x / 10.0f, angle_y / 10.0f);
+  // Only drive the axes present in the JSON (M5 update_from_json behaves the
+  // same); a missing axis must hold instead of snapping to 0.
+  if (has_yaw_angle)
+    servo_controller.moveX(m5_yaw / 10.0f);
+  if (has_pitch_angle)
+    servo_controller.moveY(-m5_pitch / 10.0f); // M5 +=up, RT +=down
 }
 
 /* ---- Handle BLE Config Data ---- */
