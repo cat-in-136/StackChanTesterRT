@@ -152,10 +152,12 @@ struct FragAssembler {
 
 static FragAssembler motion_assembler;
 static FragAssembler config_assembler;
+static FragAssembler avatar_assembler;
 
 /* ---- Forward declarations for callbacks ---- */
 static void handleBleMotionData(const char *json, size_t len);
 static void handleBleConfigData(const char *json, size_t len);
+static void handleBleAvatarData(const char *json, size_t len);
 
 /* ---- Characteristic callbacks ---- */
 class MotionCharacteristicCallbacks : public BLECharacteristicCallbacks {
@@ -222,7 +224,29 @@ class RgbCharacteristicCallbacks : public BLECharacteristicCallbacks {
 
 class AvatarCharacteristicCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pCharacteristic) override {
-    (void)pCharacteristic;
+    uint8_t *data = pCharacteristic->getData();
+    size_t len = pCharacteristic->getLength();
+    if (len == 0 || data == nullptr)
+      return;
+
+    if (len >= BLE_FRAG_HEADER_LEN && data[0] == FRAG_MAGIC0 &&
+        data[1] == FRAG_MAGIC1 && data[2] == FRAG_MAGIC2) {
+      if (avatar_assembler.addFragment(data, len)) {
+        size_t tot = avatar_assembler.getLength();
+        char *json_copy = new char[tot + 1];
+        memcpy(json_copy, avatar_assembler.getData(), tot);
+        json_copy[tot] = 0;
+        avatar_assembler.reset();
+        handleBleAvatarData(json_copy, tot);
+        delete[] json_copy;
+      }
+    } else {
+      char *json_copy = new char[len + 1];
+      memcpy(json_copy, data, len);
+      json_copy[len] = 0;
+      handleBleAvatarData(json_copy, len);
+      delete[] json_copy;
+    }
   }
 };
 
@@ -351,6 +375,74 @@ static void handleBleConfigData(const char *json, size_t len) {
     char buf[256];
     serializeJson(resp, buf, sizeof(buf));
     bleSendNotifyStr(pConfigChar, buf);
+  }
+}
+
+/* ---- Handle BLE Avatar Data ----
+ * StackChan spec (cf. references/m5stack/StackChan/firmware
+ * main/stackchan/json/json_helper.cpp avatar::update_from_json):
+ *   { "leftEye": { "weight": 0..100 },
+ *     "rightEye": { "weight": 0..100 },
+ *     "mouth": { "weight": 0..100 } }
+ * API normalization: stackchan::avatar::Feature::setWeight(int 0..100) maps
+ * onto m5avatar::Avatar open ratios (float 0.0..1.0):
+ *   leftEye.weight  -> setLeftEyeOpenRatio(weight / 100)
+ *   rightEye.weight -> setRightEyeOpenRatio(weight / 100)
+ *   mouth.weight    -> setMouthOpenRatio(weight / 100)
+ * Other feature fields (x/y/rotation/size) have no per-feature equivalent in
+ * the m5avatar API and are ignored. Expression is intentionally untouched.
+ *
+ * NOTE: an explicit eye weight also disables auto-blink
+ * (m5avatar::Avatar::facialLoop would otherwise overwrite the eye open ratio
+ * every few seconds, so the BLE setting would never stick). */
+static bool bleAvatarWeight(JsonObject obj, float *out_ratio) {
+  if (obj.isNull() || out_ratio == nullptr)
+    return false;
+  JsonVariant w = obj["weight"];
+  if (!w.is<int>() && !w.is<float>())
+    return false;
+  float weight = w.as<float>();
+  if (weight < 0.0f)
+    weight = 0.0f;
+  if (weight > 100.0f)
+    weight = 100.0f;
+  *out_ratio = weight / 100.0f;
+  return true;
+}
+
+static void handleBleAvatarData(const char *json, size_t len) {
+  (void)len;
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, json);
+  if (error)
+    return;
+
+  float ratio = 0.0f;
+  bool has_eye = false;
+
+  if (!doc["leftEye"].isNull()) {
+    JsonObject leftEye = doc["leftEye"];
+    if (bleAvatarWeight(leftEye, &ratio)) {
+      avatar.setLeftEyeOpenRatio(ratio);
+      has_eye = true;
+    }
+  }
+  if (!doc["rightEye"].isNull()) {
+    JsonObject rightEye = doc["rightEye"];
+    if (bleAvatarWeight(rightEye, &ratio)) {
+      avatar.setRightEyeOpenRatio(ratio);
+      has_eye = true;
+    }
+  }
+  if (has_eye) {
+    avatar.setIsAutoBlink(false);
+  }
+
+  if (!doc["mouth"].isNull()) {
+    JsonObject mouth = doc["mouth"];
+    if (bleAvatarWeight(mouth, &ratio)) {
+      avatar.setMouthOpenRatio(ratio);
+    }
   }
 }
 
