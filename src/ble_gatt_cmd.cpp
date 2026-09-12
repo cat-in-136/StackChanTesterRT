@@ -9,6 +9,8 @@
 #include <BLEUtils.h>
 #include <M5Unified.h>
 #include <cstring>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 
 #include "servo_controller.h"
 
@@ -20,6 +22,9 @@ extern ServoController servo_controller;
 #define BLE_CHAR_AVATAR_UUID "e2e5e5e2-1234-5678-1234-56789abcdef0"
 #define BLE_CHAR_CONFIG_UUID "e2e5e5e3-1234-5678-1234-56789abcdef0"
 #define BLE_CHAR_RGB_UUID "e2e5e5e4-1234-5678-1234-56789abcdef0"
+/* StackChanRT dedicated channel (frozen e1/e2 compat; all RT commands live
+ * here) */
+#define BLE_CHAR_RT_UUID "e2e5e5ef-1234-5678-1234-56789abcdef0"
 #define BLE_CHAR_BATTERY_UUID 0x2A19
 
 #define BLE_DEVICE_NAME "StackChanRT"
@@ -49,12 +54,14 @@ static BLECharacteristic *pMotionChar = nullptr;
 static BLECharacteristic *pAvatarChar = nullptr;
 static BLECharacteristic *pConfigChar = nullptr;
 static BLECharacteristic *pRgbChar = nullptr;
+static BLECharacteristic *pRtChar = nullptr;
 static BLECharacteristic *pBatteryChar = nullptr;
 static BLEServer *pServer = nullptr;
 
 /* ---- Forward declarations ---- */
 class MotionCharacteristicCallbacks;
 class ConfigCharacteristicCallbacks;
+class RtCharacteristicCallbacks;
 static void bleSendNotify(BLECharacteristic *pChar, uint8_t *data, size_t len);
 
 /* ---- Fragment reassembly ---- */
@@ -153,13 +160,56 @@ struct FragAssembler {
 static FragAssembler motion_assembler;
 static FragAssembler config_assembler;
 static FragAssembler avatar_assembler;
+static FragAssembler rt_assembler;
 
 /* ---- Forward declarations for callbacks ---- */
 static void handleBleMotionData(const char *json, size_t len);
 static void handleBleConfigData(const char *json, size_t len);
 static void handleBleAvatarData(const char *json, size_t len);
+static void handleBleRtData(const char *json, size_t len);
 
-/* ---- Characteristic callbacks ---- */
+/* ---- Deferred execution queue ----
+ * GATT onWrite runs in the BLE host task, NOT in loop(). Executing Dynamixel
+ * calls there (shared HardwareSerial with loop()'s servo_controller.update())
+ * or Avatar calls (setExpression suspends/resumes the draw task) races with
+ * the loop task and the Avatar draw task, corrupting state and panicking
+ * (Double exception). So onWrite only enqueues a copy; processBLE() (called
+ * from loop()) does the real work in the loop task. */
+enum BleCmdTag : uint8_t {
+  BLE_CMD_MOTION = 0,
+  BLE_CMD_AVATAR,
+  BLE_CMD_CONFIG,
+  BLE_CMD_RT,
+};
+struct BleCmdItem {
+  uint8_t tag;
+  char *json; // malloc'ed NUL-terminated copy, freed by processBLE()
+};
+#define BLE_CMD_QUEUE_DEPTH 8
+static QueueHandle_t bleCmdQueue = nullptr;
+
+static void bleEnqueue(uint8_t tag, const uint8_t *data, size_t len) {
+  if (bleCmdQueue == nullptr || data == nullptr || len == 0)
+    return;
+  if (len > BLE_MAX_JSON_LEN) {
+    M5_LOGD("ble cmd too long (%u), dropped", (unsigned)len);
+    return;
+  }
+  char *copy = (char *)malloc(len + 1);
+  if (copy == nullptr)
+    return;
+  memcpy(copy, data, len);
+  copy[len] = 0;
+  BleCmdItem item;
+  item.tag = tag;
+  item.json = copy;
+  if (xQueueSend(bleCmdQueue, &item, 0) != pdTRUE) {
+    free(copy);
+    M5_LOGD("ble queue full, dropped tag=%d", tag);
+  }
+}
+
+/* ---- Characteristic callbacks (enqueue only; see queue note above) ---- */
 class MotionCharacteristicCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pCharacteristic) override {
     uint8_t *data = pCharacteristic->getData();
@@ -170,20 +220,12 @@ class MotionCharacteristicCallbacks : public BLECharacteristicCallbacks {
     if (len >= BLE_FRAG_HEADER_LEN && data[0] == FRAG_MAGIC0 &&
         data[1] == FRAG_MAGIC1 && data[2] == FRAG_MAGIC2) {
       if (motion_assembler.addFragment(data, len)) {
-        size_t tot = motion_assembler.getLength();
-        char *json_copy = new char[tot + 1];
-        memcpy(json_copy, motion_assembler.getData(), tot);
-        json_copy[tot] = 0;
+        bleEnqueue(BLE_CMD_MOTION, motion_assembler.getData(),
+                   motion_assembler.getLength());
         motion_assembler.reset();
-        handleBleMotionData(json_copy, tot);
-        delete[] json_copy;
       }
     } else {
-      char *json_copy = new char[len + 1];
-      memcpy(json_copy, data, len);
-      json_copy[len] = 0;
-      handleBleMotionData(json_copy, len);
-      delete[] json_copy;
+      bleEnqueue(BLE_CMD_MOTION, data, len);
     }
   }
 };
@@ -198,20 +240,12 @@ class ConfigCharacteristicCallbacks : public BLECharacteristicCallbacks {
     if (len >= BLE_FRAG_HEADER_LEN && data[0] == FRAG_MAGIC0 &&
         data[1] == FRAG_MAGIC1 && data[2] == FRAG_MAGIC2) {
       if (config_assembler.addFragment(data, len)) {
-        size_t tot = config_assembler.getLength();
-        char *json_copy = new char[tot + 1];
-        memcpy(json_copy, config_assembler.getData(), tot);
-        json_copy[tot] = 0;
+        bleEnqueue(BLE_CMD_CONFIG, config_assembler.getData(),
+                   config_assembler.getLength());
         config_assembler.reset();
-        handleBleConfigData(json_copy, tot);
-        delete[] json_copy;
       }
     } else {
-      char *json_copy = new char[len + 1];
-      memcpy(json_copy, data, len);
-      json_copy[len] = 0;
-      handleBleConfigData(json_copy, len);
-      delete[] json_copy;
+      bleEnqueue(BLE_CMD_CONFIG, data, len);
     }
   }
 };
@@ -232,20 +266,34 @@ class AvatarCharacteristicCallbacks : public BLECharacteristicCallbacks {
     if (len >= BLE_FRAG_HEADER_LEN && data[0] == FRAG_MAGIC0 &&
         data[1] == FRAG_MAGIC1 && data[2] == FRAG_MAGIC2) {
       if (avatar_assembler.addFragment(data, len)) {
-        size_t tot = avatar_assembler.getLength();
-        char *json_copy = new char[tot + 1];
-        memcpy(json_copy, avatar_assembler.getData(), tot);
-        json_copy[tot] = 0;
+        bleEnqueue(BLE_CMD_AVATAR, avatar_assembler.getData(),
+                   avatar_assembler.getLength());
         avatar_assembler.reset();
-        handleBleAvatarData(json_copy, tot);
-        delete[] json_copy;
       }
     } else {
-      char *json_copy = new char[len + 1];
-      memcpy(json_copy, data, len);
-      json_copy[len] = 0;
-      handleBleAvatarData(json_copy, len);
-      delete[] json_copy;
+      bleEnqueue(BLE_CMD_AVATAR, data, len);
+    }
+  }
+};
+
+/* StackChanRT dedicated characteristic (...ef);
+ * all StackChanRT commands live here with {"cmd": ...} dispatch. */
+class RtCharacteristicCallbacks : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic *pCharacteristic) override {
+    uint8_t *data = pCharacteristic->getData();
+    size_t len = pCharacteristic->getLength();
+    if (len == 0 || data == nullptr)
+      return;
+
+    if (len >= BLE_FRAG_HEADER_LEN && data[0] == FRAG_MAGIC0 &&
+        data[1] == FRAG_MAGIC1 && data[2] == FRAG_MAGIC2) {
+      if (rt_assembler.addFragment(data, len)) {
+        bleEnqueue(BLE_CMD_RT, rt_assembler.getData(),
+                   rt_assembler.getLength());
+        rt_assembler.reset();
+      }
+    } else {
+      bleEnqueue(BLE_CMD_RT, data, len);
     }
   }
 };
@@ -446,6 +494,219 @@ static void handleBleAvatarData(const char *json, size_t len) {
   }
 }
 
+/* ---- Handle StackChanRT Data (...ef) ----
+ * All StackChanRT commands live here.
+ *   {"cmd":"rtMotion","yaw":{angle,speed},"pitch":{...}} (M5 units)
+ *   {"cmd":"rtAvatar","leftEye":{x,y,rotation,weight,size},...}
+ *   {"cmd":"rtExpression","expression":"Happy"|0..5}
+ * Unknown cmd -> ignore + log (forward-compatible for future RT cmds). */
+static int bleRtClampInt(JsonObject obj, const char *key, int lo, int hi,
+                         int fallback, bool *present) {
+  JsonVariant v = obj[key];
+  if (v.isNull() || (!v.is<int>() && !v.is<float>())) {
+    if (present)
+      *present = false;
+    return fallback;
+  }
+  if (present)
+    *present = true;
+  int iv = v.as<int>();
+  if (iv < lo)
+    iv = lo;
+  if (iv > hi)
+    iv = hi;
+  return iv;
+}
+
+static void bleRtDriveServo(bool is_yaw, JsonObject servo) {
+  if (servo.isNull())
+    return;
+  bool has_angle = false;
+  const int lo = is_yaw ? BLE_M5_YAW_MIN : BLE_M5_PITCH_MIN;
+  const int hi = is_yaw ? BLE_M5_YAW_MAX : BLE_M5_PITCH_MAX;
+  int angle = bleRtClampInt(servo, "angle", lo, hi, 0, &has_angle);
+  if (!has_angle)
+    return;
+
+  bool has_speed = false;
+  int speed = bleRtClampInt(servo, "speed", 1, 1000, 500, &has_speed);
+
+  float rt_deg =
+      is_yaw ? (angle / 10.0f) : (-angle / 10.0f); // M5 +=up, RT +=down
+  if (has_speed) {
+    if (is_yaw)
+      servo_controller.setSpeedX(speed);
+    else
+      servo_controller.setSpeedY(speed);
+  }
+  if (is_yaw)
+    servo_controller.moveX(rt_deg);
+  else
+    servo_controller.moveY(rt_deg);
+}
+
+/* rtExpression value: case-insensitive name or 0..5
+ * (Happy,Angry,Sad,Doubt,Sleepy,Neutral).
+ * NOTE: BLE is only active in BleRemote mode where the Avatar task runs, so
+ * setExpression()->suspend() is safe here (never call from LVGL modes). */
+static bool bleRtApplyExpression(JsonVariant v) {
+  if (v.isNull())
+    return false;
+  m5avatar::Expression exp = m5avatar::Expression::Neutral;
+  if (v.is<int>() || v.is<float>()) {
+    switch (v.as<int>()) {
+    case 0:
+      exp = m5avatar::Expression::Happy;
+      break;
+    case 1:
+      exp = m5avatar::Expression::Angry;
+      break;
+    case 2:
+      exp = m5avatar::Expression::Sad;
+      break;
+    case 3:
+      exp = m5avatar::Expression::Doubt;
+      break;
+    case 4:
+      exp = m5avatar::Expression::Sleepy;
+      break;
+    case 5:
+      exp = m5avatar::Expression::Neutral;
+      break;
+    default:
+      M5_LOGD("expression index out of range");
+      return false;
+    }
+  } else if (v.is<const char *>() || v.is<String>()) {
+    char buf[16];
+    strncpy(buf, v.as<const char *>(), sizeof(buf) - 1);
+    buf[sizeof(buf) - 1] = 0;
+    for (char *p = buf; *p; p++)
+      *p = tolower((unsigned char)*p);
+    if (strcmp(buf, "happy") == 0)
+      exp = m5avatar::Expression::Happy;
+    else if (strcmp(buf, "angry") == 0)
+      exp = m5avatar::Expression::Angry;
+    else if (strcmp(buf, "sad") == 0)
+      exp = m5avatar::Expression::Sad;
+    else if (strcmp(buf, "doubt") == 0)
+      exp = m5avatar::Expression::Doubt;
+    else if (strcmp(buf, "sleepy") == 0)
+      exp = m5avatar::Expression::Sleepy;
+    else if (strcmp(buf, "neutral") == 0)
+      exp = m5avatar::Expression::Neutral;
+    else {
+      M5_LOGD("expression unknown name");
+      return false;
+    }
+  } else {
+    return false;
+  }
+  avatar.setExpression(exp);
+  return true;
+}
+
+static void handleBleRtAvatar(JsonDocument &doc) {
+  float ratio = 0.0f;
+  bool has_eye = false;
+
+  const char *keys[2] = {"leftEye", "rightEye"};
+  for (int i = 0; i < 2; i++) {
+    if (doc[keys[i]].isNull())
+      continue;
+    JsonObject eye = doc[keys[i]];
+    if (bleAvatarWeight(eye, &ratio)) {
+      if (i == 0)
+        avatar.setLeftEyeOpenRatio(ratio);
+      else
+        avatar.setRightEyeOpenRatio(ratio);
+      has_eye = true;
+    }
+    // x/y -> gaze.
+    bool has_x = false, has_y = false;
+    int x = bleRtClampInt(eye, "x", -100, 100, 0, &has_x);
+    int y = bleRtClampInt(eye, "y", -100, 100, 0, &has_y);
+    if (has_x || has_y) {
+      float h = x / 100.0f;
+      float v = y / 100.0f;
+      if (i == 0)
+        avatar.setLeftGaze(v, h);
+      else
+        avatar.setRightGaze(v, h);
+    }
+    bool has_rot = false;
+    int rot = bleRtClampInt(eye, "rotation", -180, 180, 0, &has_rot);
+    if (has_rot)
+      avatar.setRotation(rot * 3.14159265f / 180.0f); // global, last wins
+    bool has_size = false;
+    int sz = bleRtClampInt(eye, "size", -100, 100, 0, &has_size);
+    if (has_size) {
+      float s = 1.0f + sz / 100.0f;
+      if (s < 0.1f)
+        s = 0.1f;
+      if (s > 2.0f)
+        s = 2.0f;
+      avatar.setScale(s); // global, last wins
+    }
+  }
+  if (has_eye)
+    avatar.setIsAutoBlink(false);
+
+  if (!doc["mouth"].isNull()) {
+    JsonObject mouth = doc["mouth"];
+    if (bleAvatarWeight(mouth, &ratio))
+      avatar.setMouthOpenRatio(ratio);
+    bool has_rot = false;
+    int rot = bleRtClampInt(mouth, "rotation", -180, 180, 0, &has_rot);
+    if (has_rot)
+      avatar.setRotation(rot * 3.14159265f / 180.0f);
+    bool has_size = false;
+    int sz = bleRtClampInt(mouth, "size", -100, 100, 0, &has_size);
+    if (has_size) {
+      float s = 1.0f + sz / 100.0f;
+      if (s < 0.1f)
+        s = 0.1f;
+      if (s > 2.0f)
+        s = 2.0f;
+      avatar.setScale(s);
+    }
+  }
+  if (!doc["expression"].isNull())
+    bleRtApplyExpression(doc["expression"]);
+}
+
+static void handleBleRtData(const char *json, size_t len) {
+  (void)len;
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, json);
+  if (error) {
+    M5_LOGD("rt JSON parse failed");
+    return;
+  }
+  const char *cmd = doc["cmd"];
+  if (cmd == nullptr) {
+    M5_LOGD("rt missing cmd");
+    return;
+  }
+  if (strcmp(cmd, "rtMotion") == 0) {
+    if (!doc["yaw"].isNull()) {
+      JsonObject yaw = doc["yaw"];
+      bleRtDriveServo(true, yaw);
+    }
+    if (!doc["pitch"].isNull()) {
+      JsonObject pitch = doc["pitch"];
+      bleRtDriveServo(false, pitch);
+    }
+  } else if (strcmp(cmd, "rtAvatar") == 0) {
+    handleBleRtAvatar(doc);
+  } else if (strcmp(cmd, "rtExpression") == 0) {
+    if (!bleRtApplyExpression(doc["expression"]))
+      M5_LOGD("rtExpression cmd missing/invalid expression");
+  } else {
+    M5_LOGD("rt unknown cmd: %s", cmd);
+  }
+}
+
 /* ---- BLE Setup ---- */
 class MyServerCallbacks : public BLEServerCallbacks {
   void onDisconnect(BLEServer *pServer) override {
@@ -492,6 +753,13 @@ void setupBLE(void) {
   pRgbChar->addDescriptor(new BLE2902());
   pRgbChar->setCallbacks(new RgbCharacteristicCallbacks());
 
+  pRtChar = pService->createCharacteristic(
+      BLEUUID(BLE_CHAR_RT_UUID), BLECharacteristic::PROPERTY_READ |
+                                     BLECharacteristic::PROPERTY_WRITE |
+                                     BLECharacteristic::PROPERTY_NOTIFY);
+  pRtChar->addDescriptor(new BLE2902());
+  pRtChar->setCallbacks(new RtCharacteristicCallbacks());
+
   pBatteryChar = pService->createCharacteristic(
       BLEUUID((uint16_t)BLE_CHAR_BATTERY_UUID),
       BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
@@ -500,6 +768,9 @@ void setupBLE(void) {
   pBatteryChar->setValue(&battery_level, 1);
 
   pService->start();
+
+  if (bleCmdQueue == nullptr)
+    bleCmdQueue = xQueueCreate(BLE_CMD_QUEUE_DEPTH, sizeof(BleCmdItem));
 
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(BLEUUID(BLE_SERVICE_UUID));
@@ -520,13 +791,52 @@ void teardownBLE(void) {
   pAvatarChar = nullptr;
   pConfigChar = nullptr;
   pRgbChar = nullptr;
+  pRtChar = nullptr;
   pBatteryChar = nullptr;
+  motion_assembler.reset();
+  avatar_assembler.reset();
+  config_assembler.reset();
+  rt_assembler.reset();
+  if (bleCmdQueue != nullptr) {
+    BleCmdItem item;
+    while (xQueueReceive(bleCmdQueue, &item, 0) == pdTRUE)
+      free(item.json);
+    vQueueDelete(bleCmdQueue);
+    bleCmdQueue = nullptr;
+  }
   BLEDevice::deinit();
   M5_LOGI("BLE server stopped.");
 }
 
 void processBLE(void) {
-  /* Battery is a static value readable via the READ property; no periodic
+  /* Deferred command execution: runs in the loop task (see queue note above).
+   * Battery is a static value readable via the READ property; no periodic
    * notifications are needed. notify() with no connected client can stall the
    * loop, so never push from here. */
+  if (bleCmdQueue == nullptr)
+    return;
+  for (int i = 0; i < BLE_CMD_QUEUE_DEPTH; i++) {
+    BleCmdItem item;
+    if (xQueueReceive(bleCmdQueue, &item, 0) != pdTRUE)
+      break;
+    if (item.json != nullptr) {
+      switch (item.tag) {
+      case BLE_CMD_MOTION:
+        handleBleMotionData(item.json, strlen(item.json));
+        break;
+      case BLE_CMD_AVATAR:
+        handleBleAvatarData(item.json, strlen(item.json));
+        break;
+      case BLE_CMD_CONFIG:
+        handleBleConfigData(item.json, strlen(item.json));
+        break;
+      case BLE_CMD_RT:
+        handleBleRtData(item.json, strlen(item.json));
+        break;
+      default:
+        break;
+      }
+      free(item.json);
+    }
+  }
 }

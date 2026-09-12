@@ -22,6 +22,12 @@ public:
   void moveY(float y);
   void moveXY(float x, float y);
 
+  // StackChanRT dedicated (BLE ...ef rtMotion): M5 speed 0..1000, 500 =
+  // default. Persistent PROFILE_VELOCITY state, applied by the next moveX/Y.
+  void setSpeedX(int m5speed);
+  void setSpeedY(int m5speed);
+  void setSpeedXY(int m5speed_x, int m5speed_y);
+
   inline float getServoOffsetX() { return servo_offset_x; };
   inline float getServoOffsetY() { return servo_offset_y; };
   inline void setServoOffsetX(float offset) { servo_offset_x = offset; };

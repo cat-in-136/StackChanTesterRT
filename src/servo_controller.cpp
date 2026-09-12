@@ -82,6 +82,32 @@ void ServoController::moveXY(float x, float y) {
   moveY(y);
 }
 
+static int32_t m5SpeedToVelocity(int m5speed, int32_t baseline) {
+  if (m5speed <= 0)
+    m5speed = 1;
+  if (m5speed > 1000)
+    m5speed = 1000;
+  int32_t v = (baseline * m5speed) / 500;
+  if (v < 1)
+    v = 1;
+  return v;
+}
+
+void ServoController::setSpeedX(int m5speed) {
+  dxl.writeControlTableItem(ControlTableItem::PROFILE_VELOCITY, id_x,
+                            m5SpeedToVelocity(m5speed, 100));
+}
+
+void ServoController::setSpeedY(int m5speed) {
+  dxl.writeControlTableItem(ControlTableItem::PROFILE_VELOCITY, id_y,
+                            m5SpeedToVelocity(m5speed, 20));
+}
+
+void ServoController::setSpeedXY(int m5speed_x, int m5speed_y) {
+  setSpeedX(m5speed_x);
+  setSpeedY(m5speed_y);
+}
+
 bool ServoController::update() {
   const auto status_x =
       dxl.readControlTableItem(ControlTableItem::MOVING_STATUS, id_x);
