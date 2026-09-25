@@ -4,6 +4,7 @@
 #include <BLE2902.h>
 #include <BLECharacteristic.h>
 #include <BLEDevice.h>
+#include <BLESecurity.h>
 #include <BLEServer.h>
 #include <BLEService.h>
 #include <BLEUtils.h>
@@ -16,15 +17,14 @@
 
 extern ServoController servo_controller;
 
-/* ---- BLE UUIDs (StackChan spec) ---- */
-#define BLE_SERVICE_UUID "e2e5e5e0-1234-5678-1234-56789abcdef0"
-#define BLE_CHAR_MOTION_UUID "e2e5e5e1-1234-5678-1234-56789abcdef0"
-#define BLE_CHAR_AVATAR_UUID "e2e5e5e2-1234-5678-1234-56789abcdef0"
-#define BLE_CHAR_CONFIG_UUID "e2e5e5e3-1234-5678-1234-56789abcdef0"
-#define BLE_CHAR_RGB_UUID "e2e5e5e4-1234-5678-1234-56789abcdef0"
-/* StackChanRT dedicated channel (frozen e1/e2 compat; all RT commands live
- * here) */
-#define BLE_CHAR_RT_UUID "e2e5e5ef-1234-5678-1234-56789abcdef0"
+/* ---- BLE UUIDs (secure revision) ----
+ * Old e2e5e5e0 service with e1/e2/e3/e4/ef characteristics is retired.
+ * This revision exposes only:
+ *   - StackChanRT dedicated command characteristic (...f1)
+ *   - Battery characteristic (standard 0x2A19, unchanged/open)
+ * Clients must re-discover; old UUIDs are intentionally not served. */
+#define BLE_SERVICE_UUID "e2e5e5f0-1234-5678-1234-56789abcdef0"
+#define BLE_CHAR_RT_UUID "e2e5e5f1-1234-5678-1234-56789abcdef0"
 #define BLE_CHAR_BATTERY_UUID 0x2A19
 
 #define BLE_DEVICE_NAME "StackChanRT"
@@ -49,20 +49,32 @@ extern ServoController servo_controller;
 #define FRAG_MAGIC2 0xC3
 #define FRAG_VERSION 0x01
 
+/* ---- Secure pairing policy ----
+ * Dynamic PIN display (DisplayOnly) + Passkey Entry + MITM + SC + Bond.
+ * The Bluedroid stack generates a random 6-digit passkey per pairing and
+ * reports it via ESP_GAP_BLE_PASSKEY_NOTIF_EVT -> onPassKeyNotify().
+ * No static PIN is set, so the displayed PIN is dynamic by construction.
+ * The RT characteristic additionally requires link encryption with MITM,
+ * so plaintext access before pairing is rejected by the controller. */
+
 /* ---- GATT Characteristic instances ---- */
-static BLECharacteristic *pMotionChar = nullptr;
-static BLECharacteristic *pAvatarChar = nullptr;
-static BLECharacteristic *pConfigChar = nullptr;
-static BLECharacteristic *pRgbChar = nullptr;
 static BLECharacteristic *pRtChar = nullptr;
 static BLECharacteristic *pBatteryChar = nullptr;
 static BLEServer *pServer = nullptr;
 
-/* ---- Forward declarations ---- */
-class MotionCharacteristicCallbacks;
-class ConfigCharacteristicCallbacks;
-class RtCharacteristicCallbacks;
-static void bleSendNotify(BLECharacteristic *pChar, uint8_t *data, size_t len);
+/* ---- PIN display handoff ----
+ * GAP security callbacks run in the BT host task and must not touch the
+ * Avatar (suspend/resume races the draw task). They only publish the latest
+ * passkey state here; processBLE() (loop task) renders it. */
+static volatile uint32_t s_passkey = 0;
+static volatile bool s_passkey_pending = false;
+static volatile bool s_link_encrypted = false;
+static volatile bool s_pairing_ok = false; // set on auth success, consumed by loop
+static volatile bool s_clear_display = false; // set on disconnect, consumed by loop
+static bool s_pin_shown = false;             // loop-task-local edge state
+static bool s_paired_msg = false;            // loop-task-local: success msg showing
+static uint32_t s_paired_until_ms = 0;       // loop-task-local: success msg expiry
+#define PAIRED_MSG_MS 10000
 
 /* ---- Fragment reassembly ---- */
 struct FragAssembler {
@@ -157,15 +169,9 @@ struct FragAssembler {
   const uint8_t *getData() const { return buf; }
 };
 
-static FragAssembler motion_assembler;
-static FragAssembler config_assembler;
-static FragAssembler avatar_assembler;
 static FragAssembler rt_assembler;
 
-/* ---- Forward declarations for callbacks ---- */
-static void handleBleMotionData(const char *json, size_t len);
-static void handleBleConfigData(const char *json, size_t len);
-static void handleBleAvatarData(const char *json, size_t len);
+/* ---- Forward declarations ---- */
 static void handleBleRtData(const char *json, size_t len);
 
 /* ---- Deferred execution queue ----
@@ -176,10 +182,7 @@ static void handleBleRtData(const char *json, size_t len);
  * (Double exception). So onWrite only enqueues a copy; processBLE() (called
  * from loop()) does the real work in the loop task. */
 enum BleCmdTag : uint8_t {
-  BLE_CMD_MOTION = 0,
-  BLE_CMD_AVATAR,
-  BLE_CMD_CONFIG,
-  BLE_CMD_RT,
+  BLE_CMD_RT = 0,
 };
 struct BleCmdItem {
   uint8_t tag;
@@ -189,10 +192,12 @@ struct BleCmdItem {
 static QueueHandle_t bleCmdQueue = nullptr;
 
 static void bleEnqueue(uint8_t tag, const uint8_t *data, size_t len) {
+  // NOTE: BT task context (called from onWrite via gattServerEventHandler):
+  // never use M5_LOG* (display target) here — serial-only logging.
   if (bleCmdQueue == nullptr || data == nullptr || len == 0)
     return;
   if (len > BLE_MAX_JSON_LEN) {
-    M5_LOGD("ble cmd too long (%u), dropped", (unsigned)len);
+    log_d("ble cmd too long (%u), dropped", (unsigned)len);
     return;
   }
   char *copy = (char *)malloc(len + 1);
@@ -205,78 +210,14 @@ static void bleEnqueue(uint8_t tag, const uint8_t *data, size_t len) {
   item.json = copy;
   if (xQueueSend(bleCmdQueue, &item, 0) != pdTRUE) {
     free(copy);
-    M5_LOGD("ble queue full, dropped tag=%d", tag);
+    // BT task context: never use M5_LOG* (display target) here.
+    log_d("ble queue full, dropped tag=%d", tag);
   }
 }
 
-/* ---- Characteristic callbacks (enqueue only; see queue note above) ---- */
-class MotionCharacteristicCallbacks : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic *pCharacteristic) override {
-    uint8_t *data = pCharacteristic->getData();
-    size_t len = pCharacteristic->getLength();
-    if (len == 0 || data == nullptr)
-      return;
-
-    if (len >= BLE_FRAG_HEADER_LEN && data[0] == FRAG_MAGIC0 &&
-        data[1] == FRAG_MAGIC1 && data[2] == FRAG_MAGIC2) {
-      if (motion_assembler.addFragment(data, len)) {
-        bleEnqueue(BLE_CMD_MOTION, motion_assembler.getData(),
-                   motion_assembler.getLength());
-        motion_assembler.reset();
-      }
-    } else {
-      bleEnqueue(BLE_CMD_MOTION, data, len);
-    }
-  }
-};
-
-class ConfigCharacteristicCallbacks : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic *pCharacteristic) override {
-    uint8_t *data = pCharacteristic->getData();
-    size_t len = pCharacteristic->getLength();
-    if (len == 0 || data == nullptr)
-      return;
-
-    if (len >= BLE_FRAG_HEADER_LEN && data[0] == FRAG_MAGIC0 &&
-        data[1] == FRAG_MAGIC1 && data[2] == FRAG_MAGIC2) {
-      if (config_assembler.addFragment(data, len)) {
-        bleEnqueue(BLE_CMD_CONFIG, config_assembler.getData(),
-                   config_assembler.getLength());
-        config_assembler.reset();
-      }
-    } else {
-      bleEnqueue(BLE_CMD_CONFIG, data, len);
-    }
-  }
-};
-
-class RgbCharacteristicCallbacks : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic *pCharacteristic) override {
-    (void)pCharacteristic;
-  }
-};
-
-class AvatarCharacteristicCallbacks : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic *pCharacteristic) override {
-    uint8_t *data = pCharacteristic->getData();
-    size_t len = pCharacteristic->getLength();
-    if (len == 0 || data == nullptr)
-      return;
-
-    if (len >= BLE_FRAG_HEADER_LEN && data[0] == FRAG_MAGIC0 &&
-        data[1] == FRAG_MAGIC1 && data[2] == FRAG_MAGIC2) {
-      if (avatar_assembler.addFragment(data, len)) {
-        bleEnqueue(BLE_CMD_AVATAR, avatar_assembler.getData(),
-                   avatar_assembler.getLength());
-        avatar_assembler.reset();
-      }
-    } else {
-      bleEnqueue(BLE_CMD_AVATAR, data, len);
-    }
-  }
-};
-
-/* StackChanRT dedicated characteristic (...ef);
+/* ---- Characteristic callbacks (enqueue only; see queue note above) ----
+ * BT task context: never use M5_LOG* (display target) here. */
+/* StackChanRT dedicated characteristic (...f1);
  * all StackChanRT commands live here with {"cmd": ...} dispatch. */
 class RtCharacteristicCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pCharacteristic) override {
@@ -298,151 +239,48 @@ class RtCharacteristicCallbacks : public BLECharacteristicCallbacks {
   }
 };
 
-/* ---- Notify helper ---- */
-static void bleSendNotify(BLECharacteristic *pChar, uint8_t *data, size_t len) {
-  if (pChar == nullptr)
-    return;
-  pChar->setValue(data, len);
-  pChar->notify();
-}
-
-static void bleSendNotifyStr(BLECharacteristic *pChar, const char *str) {
-  size_t slen = strlen(str);
-  uint8_t *buf = new uint8_t[slen];
-  memcpy(buf, str, slen);
-  bleSendNotify(pChar, buf, slen);
-  delete[] buf;
-}
-
-/* ---- Handle BLE Motion Data ---- */
-static void handleBleMotionData(const char *json, size_t len) {
-  (void)len;
-  JsonDocument doc;
-  DeserializationError error = deserializeJson(doc, json);
-  if (error)
-    return;
-
-  const char *type = doc["type"];
-  if (type == nullptr || strcmp(type, "bleMotion") != 0)
-    return;
-
-  JsonObject pitchServo = doc["pitchServo"];
-  JsonObject yawServo = doc["yawServo"];
-
-  if (pitchServo.isNull() && yawServo.isNull())
-    return;
-
-  // M5 panel sends at most one of angle/rotate per servo (see
-  // MotionDataItem.toJson). RT has no velocity-rotate equivalent here, so a
-  // rotate request moves nothing on that axis instead of being mistaken for
-  // an angle (e.g. rotate=800 must not become 80 deg).
-  bool has_yaw_angle = false, has_pitch_angle = false;
-  int m5_yaw = 0, m5_pitch = 0;
-  int speed = 500;
-
-  if (!yawServo.isNull()) {
-    if (!yawServo["rotate"].isNull() && yawServo["rotate"].as<int>() != 0) {
-      // continuous-rotation request: hold yaw (no-op on RT).
-    } else if (!yawServo["angle"].isNull()) {
-      m5_yaw = yawServo["angle"].as<int>();
-      has_yaw_angle = true;
-    }
-    if (!yawServo["speed"].isNull())
-      speed = yawServo["speed"].as<int>();
+/* ---- BLE security callbacks (BT task context: publish state only) ----
+ * BT task context (invoked from BLEDevice::gapEventHandler): never use
+ * M5_LOG* (display target) here — use serial-only log_* to avoid display
+ * SPI transactions racing the Avatar drawLoop task. */
+class BleSecurityCallbacks : public BLESecurityCallbacks {
+  uint32_t onPassKeyRequest() override {
+    // DisplayOnly side never inputs a key; this should not fire.
+    return 0;
   }
-  if (!pitchServo.isNull()) {
-    if (!pitchServo["rotate"].isNull() && pitchServo["rotate"].as<int>() != 0) {
-      // pitch has no rotate mode on M5 either: hold pitch.
-    } else if (!pitchServo["angle"].isNull()) {
-      m5_pitch = pitchServo["angle"].as<int>();
-      has_pitch_angle = true;
-    }
-    if (!pitchServo["speed"].isNull())
-      speed = pitchServo["speed"].as<int>();
+  void onPassKeyNotify(uint32_t pass_key) override {
+    s_passkey = pass_key % 1000000;
+    s_passkey_pending = true;
+    s_link_encrypted = false;
+    s_pairing_ok = false;
+    log_i("BLE passkey: %06u (enter on peer)", (unsigned)s_passkey);
   }
-  (void)speed; // RT uses fixed PROFILE_VELOCITY (see ServoController::begin)
-
-  if (!has_yaw_angle && !has_pitch_angle)
-    return;
-
-  // Clamp in M5 panel units before converting (cf. motion.dart sliders:
-  // yaw -1280..1280, pitch 0..900).
-  if (m5_yaw < BLE_M5_YAW_MIN)
-    m5_yaw = BLE_M5_YAW_MIN;
-  if (m5_yaw > BLE_M5_YAW_MAX)
-    m5_yaw = BLE_M5_YAW_MAX;
-  if (m5_pitch < BLE_M5_PITCH_MIN)
-    m5_pitch = BLE_M5_PITCH_MIN;
-  if (m5_pitch > BLE_M5_PITCH_MAX)
-    m5_pitch = BLE_M5_PITCH_MAX;
-
-  // Only drive the axes present in the JSON (M5 update_from_json behaves the
-  // same); a missing axis must hold instead of snapping to 0.
-  if (has_yaw_angle)
-    servo_controller.moveX(m5_yaw / 10.0f);
-  if (has_pitch_angle)
-    servo_controller.moveY(-m5_pitch / 10.0f); // M5 +=up, RT +=down
-}
-
-/* ---- Handle BLE Config Data ---- */
-static void handleBleConfigData(const char *json, size_t len) {
-  (void)len;
-  JsonDocument doc;
-  DeserializationError error = deserializeJson(doc, json);
-  if (error)
-    return;
-
-  const char *cmd = doc["cmd"];
-  if (cmd == nullptr)
-    return;
-
-  if (strcmp(cmd, "handshake") == 0) {
-    const char *data = doc["data"];
-    if (data != nullptr) {
-      JsonDocument resp;
-      resp["cmd"] = "notifyState";
-      resp["data"]["type"] = 4;
-      resp["data"]["state"] = data;
-      char buf[256];
-      serializeJson(resp, buf, sizeof(buf));
-      bleSendNotifyStr(pConfigChar, buf);
+  bool onSecurityRequest() override { return true; }
+  void onAuthenticationComplete(esp_ble_auth_cmpl_t cmpl) override {
+    if (cmpl.success) {
+      s_link_encrypted = true;
+      s_passkey_pending = false;
+      s_pairing_ok = true;
+      log_i("BLE pairing success, link encrypted");
+    } else {
+      s_link_encrypted = false;
+      s_passkey_pending = false;
+      s_pairing_ok = false;
+      log_i("BLE pairing failed: reason=0x%x", cmpl.fail_reason);
     }
-  } else if (strcmp(cmd, "getWifiStatus") == 0) {
-    JsonDocument resp;
-    resp["cmd"] = "notifyState";
-    resp["data"]["type"] = 1;
-    resp["data"]["state"] = "wifiConnected";
-    char buf[256];
-    serializeJson(resp, buf, sizeof(buf));
-    bleSendNotifyStr(pConfigChar, buf);
-  } else if (strcmp(cmd, "setWifi") == 0) {
-    JsonDocument resp;
-    resp["cmd"] = "notifyState";
-    resp["data"]["type"] = 1;
-    resp["data"]["state"] = "wifiConnected";
-    char buf[256];
-    serializeJson(resp, buf, sizeof(buf));
-    bleSendNotifyStr(pConfigChar, buf);
   }
-}
+  bool onConfirmPIN(uint32_t pin) override {
+    (void)pin;
+    // Numeric-comparison path is not used for DisplayOnly Passkey Entry,
+    // but accept if it ever fires.
+    return true;
+  }
+};
 
-/* ---- Handle BLE Avatar Data ----
- * StackChan spec (cf. references/m5stack/StackChan/firmware
- * main/stackchan/json/json_helper.cpp avatar::update_from_json):
- *   { "leftEye": { "weight": 0..100 },
- *     "rightEye": { "weight": 0..100 },
- *     "mouth": { "weight": 0..100 } }
- * API normalization: stackchan::avatar::Feature::setWeight(int 0..100) maps
- * onto m5avatar::Avatar open ratios (float 0.0..1.0):
- *   leftEye.weight  -> setLeftEyeOpenRatio(weight / 100)
- *   rightEye.weight -> setRightEyeOpenRatio(weight / 100)
- *   mouth.weight    -> setMouthOpenRatio(weight / 100)
- * Other feature fields (x/y/rotation/size) have no per-feature equivalent in
- * the m5avatar API and are ignored. Expression is intentionally untouched.
- *
- * NOTE: an explicit eye weight also disables auto-blink
- * (m5avatar::Avatar::facialLoop would otherwise overwrite the eye open ratio
- * every few seconds, so the BLE setting would never stick). */
+static BleSecurityCallbacks bleSecurityCallbacks;
+
+/* ---- Handle BLE Avatar weight ----
+ * StackChan spec weight 0..100 -> m5avatar open ratio 0.0..1.0. */
 static bool bleAvatarWeight(JsonObject obj, float *out_ratio) {
   if (obj.isNull() || out_ratio == nullptr)
     return false;
@@ -458,43 +296,7 @@ static bool bleAvatarWeight(JsonObject obj, float *out_ratio) {
   return true;
 }
 
-static void handleBleAvatarData(const char *json, size_t len) {
-  (void)len;
-  JsonDocument doc;
-  DeserializationError error = deserializeJson(doc, json);
-  if (error)
-    return;
-
-  float ratio = 0.0f;
-  bool has_eye = false;
-
-  if (!doc["leftEye"].isNull()) {
-    JsonObject leftEye = doc["leftEye"];
-    if (bleAvatarWeight(leftEye, &ratio)) {
-      avatar.setLeftEyeOpenRatio(ratio);
-      has_eye = true;
-    }
-  }
-  if (!doc["rightEye"].isNull()) {
-    JsonObject rightEye = doc["rightEye"];
-    if (bleAvatarWeight(rightEye, &ratio)) {
-      avatar.setRightEyeOpenRatio(ratio);
-      has_eye = true;
-    }
-  }
-  if (has_eye) {
-    avatar.setIsAutoBlink(false);
-  }
-
-  if (!doc["mouth"].isNull()) {
-    JsonObject mouth = doc["mouth"];
-    if (bleAvatarWeight(mouth, &ratio)) {
-      avatar.setMouthOpenRatio(ratio);
-    }
-  }
-}
-
-/* ---- Handle StackChanRT Data (...ef) ----
+/* ---- Handle StackChanRT Data (...f1) ----
  * All StackChanRT commands live here.
  *   {"cmd":"rtMotion","yaw":{angle,speed},"pitch":{...}} (M5 units)
  *   {"cmd":"rtAvatar","leftEye":{x,y,rotation,weight,size},...}
@@ -707,9 +509,54 @@ static void handleBleRtData(const char *json, size_t len) {
   }
 }
 
+/* ---- PIN display pump (loop task only) ----
+ * Priority: passkey prompt > pairing-success message (10 s) > blank.
+ * NOTE: Avatar speech text is ASCII-only here (PIN digits / "Pairing OK"). */
+static void pollPinDisplay(void) {
+  if (s_clear_display) {
+    s_clear_display = false;
+    s_pairing_ok = false;
+    avatar.setSpeechText("");
+    s_pin_shown = false;
+    s_paired_msg = false;
+    return;
+  }
+  if (s_passkey_pending) {
+    s_paired_msg = false; // PIN prompt takes precedence over success message
+    if (!s_pin_shown) {
+      char buf[16];
+      snprintf(buf, sizeof(buf), "PIN:%06u", (unsigned)(s_passkey % 1000000));
+      avatar.setSpeechText(buf);
+      s_pin_shown = true;
+    }
+    return;
+  }
+  if (s_pin_shown) {
+    avatar.setSpeechText("");
+    s_pin_shown = false;
+  }
+  if (s_pairing_ok) {
+    s_pairing_ok = false; // consume
+    avatar.setSpeechText("Pairing OK");
+    s_paired_msg = true;
+    s_paired_until_ms = millis() + PAIRED_MSG_MS;
+  } else if (s_paired_msg &&
+             (int32_t)(millis() - s_paired_until_ms) >= 0) {
+    avatar.setSpeechText("");
+    s_paired_msg = false;
+  }
+}
+
 /* ---- BLE Setup ---- */
+// NOTE: MyServerCallbacks runs in BT task context (gattServerEventHandler):
+// never use M5_LOG* (display target) here — use serial-only log_*.
 class MyServerCallbacks : public BLEServerCallbacks {
+  void onConnect(BLEServer *pServer) override { (void)pServer; }
   void onDisconnect(BLEServer *pServer) override {
+    s_passkey_pending = false;
+    s_link_encrypted = false;
+    s_pairing_ok = false;
+    s_clear_display = true; // loop task clears any PIN/success message
     pServer->startAdvertising();
   }
 };
@@ -720,46 +567,33 @@ void setupBLE(void) {
   BLEDevice::init(BLE_DEVICE_NAME);
   BLEDevice::setMTU(247);
 
+  /* Secure Connection + MITM + Bond with DisplayOnly I/O.
+   * No static PIN: the stack generates a dynamic 6-digit passkey per
+   * pairing and delivers it to onPassKeyNotify() for display. */
+  BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT_MITM);
+  BLEDevice::setSecurityCallbacks(&bleSecurityCallbacks);
+  BLESecurity security;
+  security.setAuthenticationMode(ESP_LE_AUTH_REQ_SC_MITM_BOND);
+  security.setCapability(ESP_IO_CAP_OUT);
+  security.setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+  security.setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+  security.setKeySize(16);
+
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
 
   BLEService *pService = pServer->createService(BLEUUID(BLE_SERVICE_UUID));
 
-  pMotionChar = pService->createCharacteristic(
-      BLEUUID(BLE_CHAR_MOTION_UUID), BLECharacteristic::PROPERTY_READ |
-                                         BLECharacteristic::PROPERTY_WRITE |
-                                         BLECharacteristic::PROPERTY_NOTIFY);
-  pMotionChar->addDescriptor(new BLE2902());
-  pMotionChar->setCallbacks(new MotionCharacteristicCallbacks());
-
-  pAvatarChar = pService->createCharacteristic(
-      BLEUUID(BLE_CHAR_AVATAR_UUID), BLECharacteristic::PROPERTY_READ |
-                                         BLECharacteristic::PROPERTY_WRITE |
-                                         BLECharacteristic::PROPERTY_NOTIFY);
-  pAvatarChar->addDescriptor(new BLE2902());
-  pAvatarChar->setCallbacks(new AvatarCharacteristicCallbacks());
-
-  pConfigChar = pService->createCharacteristic(
-      BLEUUID(BLE_CHAR_CONFIG_UUID), BLECharacteristic::PROPERTY_READ |
-                                         BLECharacteristic::PROPERTY_WRITE |
-                                         BLECharacteristic::PROPERTY_NOTIFY);
-  pConfigChar->addDescriptor(new BLE2902());
-  pConfigChar->setCallbacks(new ConfigCharacteristicCallbacks());
-
-  pRgbChar = pService->createCharacteristic(
-      BLEUUID(BLE_CHAR_RGB_UUID), BLECharacteristic::PROPERTY_READ |
-                                      BLECharacteristic::PROPERTY_WRITE |
-                                      BLECharacteristic::PROPERTY_NOTIFY);
-  pRgbChar->addDescriptor(new BLE2902());
-  pRgbChar->setCallbacks(new RgbCharacteristicCallbacks());
-
   pRtChar = pService->createCharacteristic(
       BLEUUID(BLE_CHAR_RT_UUID), BLECharacteristic::PROPERTY_READ |
                                      BLECharacteristic::PROPERTY_WRITE |
                                      BLECharacteristic::PROPERTY_NOTIFY);
+  pRtChar->setAccessPermissions(ESP_GATT_PERM_READ_ENC_MITM |
+                                ESP_GATT_PERM_WRITE_ENC_MITM);
   pRtChar->addDescriptor(new BLE2902());
   pRtChar->setCallbacks(new RtCharacteristicCallbacks());
 
+  /* Battery stays open (unchanged): readable without pairing. */
   pBatteryChar = pService->createCharacteristic(
       BLEUUID((uint16_t)BLE_CHAR_BATTERY_UUID),
       BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
@@ -772,6 +606,15 @@ void setupBLE(void) {
   if (bleCmdQueue == nullptr)
     bleCmdQueue = xQueueCreate(BLE_CMD_QUEUE_DEPTH, sizeof(BleCmdItem));
 
+  s_passkey = 0;
+  s_passkey_pending = false;
+  s_link_encrypted = false;
+  s_pairing_ok = false;
+  s_clear_display = false;
+  s_pin_shown = false;
+  s_paired_msg = false;
+  s_paired_until_ms = 0;
+
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(BLEUUID(BLE_SERVICE_UUID));
   pAdvertising->setScanResponse(true);
@@ -782,20 +625,22 @@ void setupBLE(void) {
 }
 
 void teardownBLE(void) {
+  // Loop-task context: safe to clear Avatar speech directly.
+  avatar.setSpeechText("");
+  s_passkey_pending = false;
+  s_link_encrypted = false;
+  s_pairing_ok = false;
+  s_clear_display = false;
+  s_pin_shown = false;
+  s_paired_msg = false;
+  s_paired_until_ms = 0;
   if (pServer != nullptr) {
     BLEServer *srv = pServer;
     pServer = nullptr;
     delete srv;
   }
-  pMotionChar = nullptr;
-  pAvatarChar = nullptr;
-  pConfigChar = nullptr;
-  pRgbChar = nullptr;
   pRtChar = nullptr;
   pBatteryChar = nullptr;
-  motion_assembler.reset();
-  avatar_assembler.reset();
-  config_assembler.reset();
   rt_assembler.reset();
   if (bleCmdQueue != nullptr) {
     BleCmdItem item;
@@ -813,6 +658,7 @@ void processBLE(void) {
    * Battery is a static value readable via the READ property; no periodic
    * notifications are needed. notify() with no connected client can stall the
    * loop, so never push from here. */
+  pollPinDisplay();
   if (bleCmdQueue == nullptr)
     return;
   for (int i = 0; i < BLE_CMD_QUEUE_DEPTH; i++) {
@@ -821,15 +667,6 @@ void processBLE(void) {
       break;
     if (item.json != nullptr) {
       switch (item.tag) {
-      case BLE_CMD_MOTION:
-        handleBleMotionData(item.json, strlen(item.json));
-        break;
-      case BLE_CMD_AVATAR:
-        handleBleAvatarData(item.json, strlen(item.json));
-        break;
-      case BLE_CMD_CONFIG:
-        handleBleConfigData(item.json, strlen(item.json));
-        break;
       case BLE_CMD_RT:
         handleBleRtData(item.json, strlen(item.json));
         break;
