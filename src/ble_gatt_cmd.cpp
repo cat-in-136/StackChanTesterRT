@@ -31,6 +31,12 @@ extern ServoController servo_controller;
 #define BLE_MAX_JSON_LEN 2048
 #define BLE_FRAG_HEADER_LEN 10
 
+/* ---- Avatar speech text limit (tentative) ----
+ * Balloon has no wrapping/scrolling, so over-long text overflows the
+ * 320px display. Until auto-shrink/wrap is implemented, reject text
+ * longer than this (bytes) with an error log and keep the old display. */
+#define BLE_SPEECH_TEXT_MAX_LEN 32
+
 /* ---- Fragment header magic ---- */
 /* M5 StackChan panel compatibility mapping (tenths of a degree):
  *   M5 yaw   : -1280..1280, 0 = front, + = left.
@@ -301,6 +307,7 @@ static bool bleAvatarWeight(JsonObject obj, float *out_ratio) {
  *   {"cmd":"rtMotion","yaw":{angle,speed},"pitch":{...}} (M5 units)
  *   {"cmd":"rtAvatar","leftEye":{x,y,rotation,weight,size},...}
  *   {"cmd":"rtExpression","expression":"Happy"|0..5}
+ *   {"cmd":"rtSpeechText","text":"Hello"} ("speechText" alias accepted)
  * Unknown cmd -> ignore + log (forward-compatible for future RT cmds). */
 static int bleRtClampInt(JsonObject obj, const char *key, int lo, int hi,
                          int fallback, bool *present) {
@@ -408,6 +415,37 @@ static bool bleRtApplyExpression(JsonVariant v) {
   return true;
 }
 
+/* rtSpeechText value: {"cmd":"rtSpeechText","text":"..."}.
+ * "speechText" is accepted as an alias for "text". Empty string clears
+ * the balloon. Over-long text is rejected with an error log and the
+ * display is left unchanged (Balloon has no wrapping).
+ * NOTE: runs in the loop task via processBLE(), same as rtExpression. */
+static bool bleRtApplySpeechText(JsonVariant v) {
+  if (v.isNull())
+    return false;
+  if (!v.is<const char *>() && !v.is<String>())
+    return false;
+  const char *text = v.as<const char *>();
+  if (text == nullptr)
+    return false;
+  size_t len = strlen(text);
+  if (len > BLE_SPEECH_TEXT_MAX_LEN) {
+    M5_LOGE("rtSpeechText too long (%u > %u), ignored",
+            (unsigned)len, (unsigned)BLE_SPEECH_TEXT_MAX_LEN);
+    return false;
+  }
+  if (s_passkey_pending) {
+    // Keep the pairing PIN visible; user text must not hide it.
+    M5_LOGD("rtSpeechText ignored while PIN prompt active");
+    return false;
+  }
+  avatar.setSpeechText(text);
+  // User text takes over from the pairing-success message: cancel its
+  // auto-clear timer so the message expiry does not wipe the new text.
+  s_paired_msg = false;
+  return true;
+}
+
 static void handleBleRtAvatar(JsonDocument &doc) {
   float ratio = 0.0f;
   bool has_eye = false;
@@ -504,6 +542,12 @@ static void handleBleRtData(const char *json, size_t len) {
   } else if (strcmp(cmd, "rtExpression") == 0) {
     if (!bleRtApplyExpression(doc["expression"]))
       M5_LOGD("rtExpression cmd missing/invalid expression");
+  } else if (strcmp(cmd, "rtSpeechText") == 0) {
+    JsonVariant t = doc["text"];
+    if (t.isNull())
+      t = doc["speechText"];
+    if (!bleRtApplySpeechText(t))
+      M5_LOGD("rtSpeechText cmd missing/invalid text");
   } else {
     M5_LOGD("rt unknown cmd: %s", cmd);
   }
