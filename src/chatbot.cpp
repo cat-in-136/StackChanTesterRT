@@ -202,13 +202,13 @@ void connectWs() {
   }
   xiaozhi::DeviceIdentity id = g_auth.identity();
   M5_LOGI("chatbot: wss connect %.60s...", g_runtime_ws_url.c_str());
-  // on_open (同期) が sendHello -> PhHelloWait へ遷移させるため、
+  // on_open (非同期) が sendHello -> PhHelloWait へ遷移させるため、
   // 先に PhWsConnect を立ててから begin する (上書き防止)。
   setPhase(PhWsConnect);
   g_last_retry_ms = millis();
   if (!g_ws.begin(g_runtime_ws_url, g_runtime_ws_token, id.device_id,
                   id.client_id)) {
-    // MiniWs::begin 失敗 = TCP/ハンドシェイク失敗。再試行は loop 側。
+    // ArduinoWs::begin 失敗 = URL parse失敗。再試行は loop 側。
     if (g_phase == PhWsConnect) {
       g_last_error = "wss connect failed";
       M5_LOGE("chatbot: %s", g_last_error.c_str());
@@ -427,8 +427,8 @@ void loopChatbot(void) {
       break;
     case PhWsConnect:
       if (!g_ws.isConnected() && now - g_last_retry_ms > 5000u) {
-        // begin 済みで未接続なら WebSocketsClient が裏で再試行する。
-        // 長停滞時のみ作り直す。
+        // 非同期接続の再試行は chatbot 側で作り直す (ライブラリ側の
+        // 自動再接続は ArduinoWs で 10s に抑止)。
         connectWs();
       }
       break;
