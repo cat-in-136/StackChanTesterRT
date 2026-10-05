@@ -17,6 +17,19 @@ struct ServerConfig {
   std::string token;  // Bearer token
 };
 
+// OTA 応答の mqtt ブロック (公式ファームは mqtt 優先)。
+// subscribe_topic が "null"/空の場合は device_id から派生する
+// (devices/p2p/{mac_underscore_lower})。
+struct MqttConfig {
+  bool present = false;
+  std::string endpoint;        // ホスト[:ポート]
+  std::string client_id;
+  std::string username;
+  std::string password;
+  std::string publish_topic;   // "device-server"
+  std::string subscribe_topic;
+};
+
 struct ActivationInfo {
   bool present = false;  // activation ブロック有無
   std::string message;

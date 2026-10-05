@@ -16,6 +16,7 @@ class ArduinoWs {
     std::function<void(const std::string& text)> on_text;
     std::function<void(const uint8_t* data, size_t len)> on_binary;
     std::function<void()> on_close;
+    std::function<void(const std::string& msg)> on_error;
   };
   Events ev;
 

@@ -1,20 +1,26 @@
 #include "auth_store.h"
 
+#include <M5Unified.h>
 #include <Preferences.h>
 #include <WiFi.h>
 
-static const char* kNs = "xz-min";
+static const char* kNs = "board";  // 公式ファーム (board.cc) と同一 namespace
 
 void AuthStore::begin() {
-  Preferences p;
-  p.begin(kNs, true);
-  // 初回はキーが存在せず getString() が NOT_FOUND エラーログを出すため
-  // isKey() でガードする。無い場合は空文字扱い (正常系)。
-  uuid_ = p.isKey("uuid") ? p.getString("uuid", "").c_str() : "";
-  p.end();
+  // 公式ファームの bind 済み UUID を最優先 (NVS "board"/"uuid")。
+  // 公式と同一 namespace のため、NVS を消さずに書き換えた場合は引き継がれる。
+  {
+    Preferences p;
+    p.begin(kNs, true);
+    uuid_ = p.isKey("uuid") ? p.getString("uuid", "").c_str() : "";
+    p.end();
+  }
+  const char* src = "board";
   if (uuid_.empty()) {
     ensureClientId();
+    src = "fresh";
   }
+  M5_LOGI("auth: client-id %.36s src=%s", uuid_.c_str(), src);
 }
 
 std::string AuthStore::makeUuid() {
@@ -33,6 +39,15 @@ std::string AuthStore::makeUuid() {
 
 std::string AuthStore::ensureClientId() {
   if (!uuid_.empty()) return uuid_;
+  // 公式ファーム (xiaozhi-esp32) と同一 NVS namespace ("board"/"uuid")。
+  // 同一デバイスで bind 済みなら bind 時の UUID を引き継ぐ。
+  {
+    Preferences p;
+    p.begin(kNs, true);
+    uuid_ = p.isKey("uuid") ? p.getString("uuid", "").c_str() : "";
+    p.end();
+    if (!uuid_.empty()) return uuid_;
+  }
   uuid_ = makeUuid();
   Preferences p;
   p.begin(kNs, false);

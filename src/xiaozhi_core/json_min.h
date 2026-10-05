@@ -116,5 +116,26 @@ inline bool extractInt(const std::string& json, const char* key, int& out) {
   return true;
 }
 
+// キー直後の "{...}" スコープをバランス考慮で取り出す。無ければ false。
+inline bool jsonScope(const std::string& json, const std::string& key,
+                      std::string& out) {
+  size_t pos = json.find("\"" + key + "\"");
+  if (pos == std::string::npos) return false;
+  size_t brace = json.find('{', pos + key.size() + 2);
+  if (brace == std::string::npos) return false;
+  int depth = 0;
+  for (size_t i = brace; i < json.size(); i++) {
+    if (json[i] == '{') depth++;
+    if (json[i] == '}') {
+      depth--;
+      if (depth == 0) {
+        out = json.substr(brace, i - brace + 1);
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 }  // namespace json_min
 }  // namespace xiaozhi

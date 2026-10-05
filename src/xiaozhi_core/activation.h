@@ -36,11 +36,12 @@ inline std::string buildActivateBody(const std::string& /*challenge*/) {
 struct CheckVersionResult {
   bool ok = false;  // websocket 取得 or activation コード表示のいずれか成立
   ServerConfig server;
+  MqttConfig mqtt;
   ActivationInfo activation;
   bool has_websocket = false;
 };
 
-// body から websocket{url,token} と activation{...} を抽出。
+// body から websocket{url,token} / mqtt{...} / activation{...} を抽出。
 // 未バインド時 (activation のみで websocket 無し) も ok とする。
 // firmware.url 等の誤拾い防止のため "websocket" オブジェクト内に限定する。
 inline bool parseCheckVersionBody(const std::string& body,
@@ -75,6 +76,20 @@ inline bool parseCheckVersionBody(const std::string& body,
       }
     }
   }
+  {
+    std::string scope;
+    if (json_min::jsonScope(body, "mqtt", scope)) {
+      out.mqtt.present = true;
+      json_min::extractString(scope, "endpoint", out.mqtt.endpoint);
+      json_min::extractString(scope, "client_id", out.mqtt.client_id);
+      json_min::extractString(scope, "username", out.mqtt.username);
+      json_min::extractString(scope, "password", out.mqtt.password);
+      json_min::extractString(scope, "publish_topic", out.mqtt.publish_topic);
+      json_min::extractString(scope, "subscribe_topic",
+                              out.mqtt.subscribe_topic);
+      if (out.mqtt.publish_topic.empty()) out.mqtt.publish_topic = "device-server";
+    }
+  }
   if (body.find("\"activation\"") != std::string::npos) {
     ActivationInfo a;
     a.present = true;
@@ -85,7 +100,7 @@ inline bool parseCheckVersionBody(const std::string& body,
     if (json_min::extractInt(body, "timeout_ms", t)) a.timeout_ms = t;
     out.activation = a;
   }
-  out.ok = out.has_websocket ||
+  out.ok = out.has_websocket || out.mqtt.present ||
            (out.activation.present && !out.activation.code.empty());
   return out.ok;
 }

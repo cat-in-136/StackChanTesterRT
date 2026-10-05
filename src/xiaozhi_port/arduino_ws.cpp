@@ -125,6 +125,10 @@ void ArduinoWs::handleEvent(WStype_t type, uint8_t* payload, size_t len) {
       if (ev.on_close) ev.on_close();
       break;
     case WStype_ERROR:
+      if (ev.on_error) {
+        ev.on_error(std::string(payload ? (const char*)payload : "", len));
+      }
+      break;
     case WStype_PING:
     case WStype_PONG:
     default:
