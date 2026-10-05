@@ -3,6 +3,7 @@
 #include <lvgl.h>
 
 #include "ble_gatt_cmd.h"
+#include "chatbot.h"
 #include "scpi_handlers.h"
 #include "servo_controller.h"
 
@@ -23,6 +24,7 @@ enum OperationMode {
   TestServo,
   BleRemote,
   Random,
+  Chatbot,
   TorqueOff
 };
 
@@ -149,6 +151,7 @@ static void create_menu_screen() {
   add_menu_button(container, "Position", OperationMode::Position);
   add_menu_button(container, "Servo Test", OperationMode::TestServo);
   add_menu_button(container, "Random", OperationMode::Random);
+  add_menu_button(container, "Chatbot", OperationMode::Chatbot);
 }
 
 /* Servo offset adjust screen. One row per axis: the current offset value
@@ -402,13 +405,27 @@ static void changeOperationMode(OperationMode new_mode) {
   if (new_mode == OperationMode::BleRemote) {
     setupBLE();
   }
+  if (op_mode == OperationMode::Chatbot) {
+    teardownChatbot();
+  }
+  if (new_mode == OperationMode::Chatbot) {
+    // chatbot 側は expression を変えない (scaffold) ため、
+    // Avatar タスクとの競合はなく、他モードと同様に前段で呼べる。
+    setupChatbot();
+  }
 
   if (lvgl_mode != new_lvgl_mode) {
     if (new_lvgl_mode) {
       M5.setTouchButtonHeight(0);
       avatarTaskStopAndWait();
+      M5.Log.setLogLevel(m5::log_target_display, ESP_LOG_INFO);
     } else {
       M5.setTouchButtonHeightByRatio(TOUCH_BUTTON_RATIO);
+      // Avatar 稼働中は画面ログを止める。M5.Log の display ターゲットは
+      // 呼び出し元タスクから直接 SPI を叩くため drawLoop と競合し、
+      // spiEndTransaction の mutex assert で落ちる (Chatbot で発症済み)。
+      // シリアルログは継続する。
+      M5.Log.setLogLevel(m5::log_target_display, ESP_LOG_NONE);
       avatarTaskStart();
     }
   }
@@ -660,6 +677,18 @@ static void loopRandom() {
   }
 }
 
+static void loopChatbotMode() {
+  if (M5.BtnA.wasReleasedAfterHold() || M5.BtnPWR.wasClicked()) {
+    changeOperationMode(OperationMode::Menu);
+    return;
+  }
+  if (M5.BtnA.wasSingleClicked()) {
+    // 手動 start/stop 切替の簡易操作 (詳細は SCPI :CHAT:*)
+    chatbotStart();
+  }
+  ::loopChatbot();
+}
+
 static void loopTorqueOff() {
   static bool torque_off_done = false;
 
@@ -717,6 +746,9 @@ void loop() {
     break;
   case OperationMode::Random:
     loopRandom();
+    break;
+  case OperationMode::Chatbot:
+    loopChatbotMode();
     break;
   case OperationMode::TorqueOff:
     loopTorqueOff();

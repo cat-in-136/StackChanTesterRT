@@ -2,13 +2,15 @@
 #SHELL := /bin/bash
 #PATH := /usr/local/bin:$(PATH)
 
-all: compile_commands.json
+subdirs = data/cert
+
+all: compile_commands.json $(subdirs)
 	pio -f -c vim run
 
 upload:
 	pio -f -c vim run --target upload
 
-clean:
+clean: $(subdirs)
 	rm compile_commands.json
 	pio -f -c vim run --target clean
 
@@ -24,4 +26,7 @@ update:
 compile_commands.json:
 	pio -f -c vim run --target compiledb
 
-.PHONY: all upload clean program uploadfs update
+$(subdirs):
+	$(MAKE) -C $@ $(MAKECMDGOALS)
+
+.PHONY: all upload clean program uploadfs update $(subdirs)

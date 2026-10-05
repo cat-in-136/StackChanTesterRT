@@ -1,5 +1,6 @@
 #include "scpi_handlers.h"
 
+#include "chatbot.h"
 #include "servo_controller.h"
 #include <M5Unified.h>
 #include <Preferences.h>
@@ -156,6 +157,85 @@ void setupSCPI(void) {
   scpi.RegisterCommand(
       F("*TST"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
         interface.println("0"); // Not supported as of now
+      });
+
+  // ---- AI Chatbot (xiaozhi-min-ws テキスト PoC) ----
+  // :CHAT:TEXT <text...>  STTバイパス送信 (plan §4, A/B形式は :CHAT:FORMAT で切替)
+  // :CHAT:START / :CHAT:STOP / :CHAT:ABORT  セッション操作
+  // :CHAT:STAT?  phase/pipe/wifi/fmt + 直近チャット表示
+  // :CHAT:FORMAT A|B / :CHAT:FORMAT?  バイパス形式切替
+  scpi.RegisterCommand(
+      F(":CHAT:TEXT"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
+        String text;
+        for (size_t i = 0; i < parameters.Size(); i++) {
+          if (i > 0) text += " ";
+          text += parameters[i];
+        }
+        text.trim();
+        // 引用符で囲まれていたら剥がす
+        if (text.length() >= 2 && text.startsWith("\"") &&
+            text.endsWith("\"")) {
+          text = text.substring(1, text.length() - 1);
+        }
+        if (text.isEmpty()) {
+          interface.println(F("NG,empty text"));
+          return;
+        }
+        interface.printf("OK,send %d bytes\r\n", (int)text.length());
+        if (!chatbotSendText(text.c_str())) {
+          interface.print(F("NG,"));
+          interface.println(chatbotStatus());
+        }
+      });
+  scpi.RegisterCommand(
+      F(":CHAT:START"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
+        (void)commands;
+        (void)parameters;
+        chatbotStart();
+        interface.print(F("OK,"));
+        interface.println(chatbotStatus());
+      });
+  scpi.RegisterCommand(
+      F(":CHAT:STOP"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
+        (void)commands;
+        (void)parameters;
+        chatbotStop();
+        interface.print(F("OK,"));
+        interface.println(chatbotStatus());
+      });
+  scpi.RegisterCommand(
+      F(":CHAT:ABORT"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
+        (void)commands;
+        (void)parameters;
+        chatbotAbort();
+        interface.print(F("OK,"));
+        interface.println(chatbotStatus());
+      });
+  scpi.RegisterCommand(
+      F(":CHAT:STAT?"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
+        (void)commands;
+        (void)parameters;
+        interface.println(chatbotStatus());
+        interface.println(chatbotLastChat());
+      });
+  scpi.RegisterCommand(
+      F(":CHAT:FORMAT"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
+        const char* p0 = parameters[0];
+        if (p0 != nullptr && (p0[0] == 'B' || p0[0] == 'b')) {
+          chatbotSetFormatB(true);
+          interface.println(F("OK,B"));
+        } else if (p0 != nullptr && (p0[0] == 'A' || p0[0] == 'a')) {
+          chatbotSetFormatB(false);
+          interface.println(F("OK,A"));
+        } else {
+          interface.println(F("NG,use A or B"));
+        }
+      });
+  scpi.RegisterCommand(
+      F(":CHAT:FORMAT?"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
+        (void)commands;
+        (void)parameters;
+        interface.println(chatbotGetFormatB() ? F("B") : F("A"));
       });
 
   scpi.SetErrorHandler(
