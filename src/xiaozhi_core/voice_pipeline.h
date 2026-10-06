@@ -5,7 +5,9 @@
 #include <functional>
 #include <string>
 
-#include "json_min.h"
+#include <ArduinoJson.h>
+#include <cstring>
+
 #include "types.h"
 
 namespace xiaozhi {
@@ -142,43 +144,50 @@ class VoicePipeline {
 
   static ServerEvent classify(const std::string& text) {
     ServerEvent ev;
-    std::string type;
-    if (!json_min::extractString(text, "type", type)) return ev;
-    if (type == "stt") {
+    JsonDocument doc;
+    if (deserializeJson(doc, text.c_str())) return ev;
+    const char* type = doc["type"];
+    if (!type) return ev;
+    if (std::strcmp(type, "stt") == 0) {
       ev.kind = ServerEvent::Kind::Stt;
-      json_min::extractString(text, "text", ev.text);
-    } else if (type == "llm") {
+      const char* t = doc["text"];
+      if (t) ev.text = t;
+    } else if (std::strcmp(type, "llm") == 0) {
       ev.kind = ServerEvent::Kind::LlmEmotion;
-      json_min::extractString(text, "emotion", ev.emotion);
+      const char* e = doc["emotion"];
+      if (e) ev.emotion = e;
       // text(emoji) があれば sentence 相当として使わない (emotion のみ)。
-    } else if (type == "tts") {
-      std::string st;
-      json_min::extractString(text, "state", st);
-      if (st == "start") {
+    } else if (std::strcmp(type, "tts") == 0) {
+      const char* st = doc["state"];
+      if (!st) return ev;
+      if (std::strcmp(st, "start") == 0) {
         ev.kind = ServerEvent::Kind::TtsStart;
-      } else if (st == "stop") {
+      } else if (std::strcmp(st, "stop") == 0) {
         ev.kind = ServerEvent::Kind::TtsStop;
-      } else if (st == "sentence_start") {
+      } else if (std::strcmp(st, "sentence_start") == 0) {
         ev.kind = ServerEvent::Kind::TtsSentence;
-        json_min::extractString(text, "text", ev.text);
+        const char* t = doc["text"];
+        if (t) ev.text = t;
       }
-    } else if (type == "alert") {
+    } else if (std::strcmp(type, "alert") == 0) {
       ev.kind = ServerEvent::Kind::Alert;
-      if (!json_min::extractString(text, "message", ev.text))
-        json_min::extractString(text, "text", ev.text);
-    } else if (type == "system") {
-      std::string cmd;
-      json_min::extractString(text, "command", cmd);
-      if (cmd == "reboot")
+      const char* m = doc["message"];
+      if (!m) m = doc["text"];
+      if (m) ev.text = m;
+    } else if (std::strcmp(type, "system") == 0) {
+      const char* cmd = doc["command"];
+      if (cmd && std::strcmp(cmd, "reboot") == 0)
         ev.kind = ServerEvent::Kind::Reboot;
       else
         ev.kind = ServerEvent::Kind::Ignored;  // 公式は warn 無視
-    } else if (type == "mcp" || type == "notify" || type == "custom" ||
-               type == "glyph") {
+    } else if (std::strcmp(type, "mcp") == 0 ||
+               std::strcmp(type, "notify") == 0 ||
+               std::strcmp(type, "custom") == 0 ||
+               std::strcmp(type, "glyph") == 0) {
       ev.kind = ServerEvent::Kind::Ignored;
-    } else if (type == "hello") {
+    } else if (std::strcmp(type, "hello") == 0) {
       ev.kind = ServerEvent::Kind::Ignored;  // hello は WsSession 側で処理
-    } else if (type == "goodbye") {
+    } else if (std::strcmp(type, "goodbye") == 0) {
       ev.kind = ServerEvent::Kind::Goodbye;
     }
     return ev;

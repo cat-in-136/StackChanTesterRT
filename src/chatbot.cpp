@@ -5,6 +5,10 @@
 #include <Preferences.h>
 #include <WiFi.h>
 
+#include <ArduinoJson.h>
+
+#include <cstring>
+
 #include "xiaozhi_core/activation.h"
 #include "xiaozhi_core/debug_text_channel.h"
 #include "xiaozhi_core/voice_pipeline.h"
@@ -445,20 +449,34 @@ void setupPipeCallbacks() {
 // MCP initialize / tools/list に応答する。それ以外の mcp (notifications 等) は無視。
 // 戻り値: mcp メッセージだったか (hello 等への処理を継続しない)。
 bool tryHandleMcp(const std::string& text) {
-  std::string type;
-  if (!xiaozhi::json_min::extractString(text, "type", type)) return false;
-  if (type != "mcp") return false;
-  std::string method;
-  xiaozhi::json_min::extractString(text, "method", method);
+  JsonDocument doc;
+  if (deserializeJson(doc, text.c_str())) return false;
+  const char* type = doc["type"];
+  if (!type || std::strcmp(type, "mcp") != 0) return false;
+  // method/id は payload 配下・トップレベルの両対応。
+  const char* method = nullptr;
+  if (!doc["payload"].isNull() && !doc["payload"]["method"].isNull()) {
+    method = doc["payload"]["method"];
+  } else if (!doc["method"].isNull()) {
+    method = doc["method"];
+  }
+  std::string method_s = method ? method : "";
   int id = 0;
-  bool has_id = xiaozhi::json_min::extractInt(text, "id", id);
-  M5_LOGI("chatbot: mcp rx method=%s", method.empty() ? "(none)" : method.c_str());
-  if (method == "initialize" && has_id) {
+  bool has_id = false;
+  if (!doc["payload"].isNull() && !doc["payload"]["id"].isNull()) {
+    id = doc["payload"]["id"].as<int>();
+    has_id = true;
+  } else if (!doc["id"].isNull()) {
+    id = doc["id"].as<int>();
+    has_id = true;
+  }
+  M5_LOGI("chatbot: mcp rx method=%s", method_s.empty() ? "(none)" : method_s.c_str());
+  if (method_s == "initialize" && has_id) {
     std::string resp =
         xiaozhi::buildMcpInitializeResult(g_pipe.sessionId(), id);
     bool ok = transportSend(resp);
     M5_LOGI("chatbot: mcp initialize replied id=%d ok=%d", id, (int)ok);
-  } else if (method == "tools/list" && has_id) {
+  } else if (method_s == "tools/list" && has_id) {
     std::string resp =
         xiaozhi::buildMcpToolsListResult(g_pipe.sessionId(), id);
     bool ok = transportSend(resp);

@@ -1,8 +1,10 @@
 #pragma once
 // WsSession: hello 組立・server hello 解析・10s待ち定数 (plan §3.1)
+#include <ArduinoJson.h>
+
+#include <cstring>
 #include <string>
 
-#include "json_min.h"
 #include "types.h"
 
 namespace xiaozhi {
@@ -13,17 +15,35 @@ static const int kHelloTimeoutMs = 10000;
 
 // D->S hello (v1 固定)。公式は features.mcp:true が必須級。
 inline std::string buildHello() {
-  return "{\"type\":\"hello\",\"version\":1,\"features\":{\"mcp\":true},"
-         "\"transport\":\"websocket\",\"audio_params\":{\"format\":\"opus\","
-         "\"sample_rate\":16000,\"channels\":1,\"frame_duration\":60}}";
+  JsonDocument doc;
+  doc["type"] = "hello";
+  doc["version"] = 1;
+  doc["features"]["mcp"] = true;
+  doc["transport"] = "websocket";
+  doc["audio_params"]["format"] = "opus";
+  doc["audio_params"]["sample_rate"] = 16000;
+  doc["audio_params"]["channels"] = 1;
+  doc["audio_params"]["frame_duration"] = 60;
+  String out;
+  serializeJson(doc, out);
+  return std::string(out.c_str());
 }
 
 // D->S hello (MQTT 制御チャネル用: transport=udp, version=3)。
 // 公式 mqtt_protocol.cc GetHelloMessage 互換。UDP は後段で実装予定。
 inline std::string buildMqttHello() {
-  return "{\"type\":\"hello\",\"version\":3,\"features\":{\"mcp\":true},"
-         "\"transport\":\"udp\",\"audio_params\":{\"format\":\"opus\","
-         "\"sample_rate\":16000,\"channels\":1,\"frame_duration\":60}}";
+  JsonDocument doc;
+  doc["type"] = "hello";
+  doc["version"] = 3;
+  doc["features"]["mcp"] = true;
+  doc["transport"] = "udp";
+  doc["audio_params"]["format"] = "opus";
+  doc["audio_params"]["sample_rate"] = 16000;
+  doc["audio_params"]["channels"] = 1;
+  doc["audio_params"]["frame_duration"] = 60;
+  String out;
+  serializeJson(doc, out);
+  return std::string(out.c_str());
 }
 
 struct ServerHello {
@@ -35,17 +55,23 @@ struct ServerHello {
 // type==hello && transport==websocket のみ受理。session_id 欠落でも true。
 // (公式 websocket_protocol.cc:236-254 は sid 無しでも event set する)
 inline bool parseServerHello(const std::string& text, ServerHello& out) {
-  std::string type, transport;
-  if (!json_min::extractString(text, "type", type)) return false;
-  if (type != "hello") return false;
-  if (!json_min::extractString(text, "transport", transport)) return false;
-  if (transport != "websocket") return false;
+  JsonDocument doc;
+  if (deserializeJson(doc, text.c_str())) return false;
+  const char* type = doc["type"];
+  if (!type || std::strcmp(type, "hello") != 0) return false;
+  const char* transport = doc["transport"];
+  if (!transport || std::strcmp(transport, "websocket") != 0) return false;
   // session_id は任意 (公式は保存のみ)。欠落・空でも受理する。
-  json_min::extractString(text, "session_id", out.session_id);
-  int sr = 0, fd = 0;
-  if (json_min::extractInt(text, "sample_rate", sr)) out.sample_rate = sr;
-  if (json_min::extractInt(text, "frame_duration", fd) && fd > 0)
-    out.frame_duration = fd;
+  const char* sid = doc["session_id"];
+  out.session_id = sid ? sid : "";
+  if (!doc["sample_rate"].isNull()) {
+    int sr = doc["sample_rate"].as<int>();
+    if (sr > 0) out.sample_rate = sr;
+  }
+  if (!doc["frame_duration"].isNull()) {
+    int fd = doc["frame_duration"].as<int>();
+    if (fd > 0) out.frame_duration = fd;
+  }
   return true;
 }
 
@@ -65,24 +91,32 @@ struct ServerHelloMqtt {
 // type==hello && transport==udp のみ受理。udp{server,port,key,nonce} を抽出。
 inline ServerHelloMqtt parseServerHelloMqtt(const std::string& text) {
   ServerHelloMqtt h;
-  std::string type, transport;
-  if (!json_min::extractString(text, "type", type)) return h;
-  if (type != "hello") return h;
-  if (!json_min::extractString(text, "transport", transport)) return h;
-  if (transport != "udp") return h;
+  JsonDocument doc;
+  if (deserializeJson(doc, text.c_str())) return h;
+  const char* type = doc["type"];
+  if (!type || std::strcmp(type, "hello") != 0) return h;
+  const char* transport = doc["transport"];
+  if (!transport || std::strcmp(transport, "udp") != 0) return h;
   h.ok = true;
-  json_min::extractString(text, "session_id", h.session_id);
-  int sr = 0, fd = 0;
-  if (json_min::extractInt(text, "sample_rate", sr)) h.sample_rate = sr;
-  if (json_min::extractInt(text, "frame_duration", fd) && fd > 0)
-    h.frame_duration = fd;
-  std::string scope;
-  if (json_min::jsonScope(text, "udp", scope)) {
-    json_min::extractString(scope, "server", h.udp_server);
-    int p = 0;
-    if (json_min::extractInt(scope, "port", p)) h.udp_port = p;
-    json_min::extractString(scope, "key", h.udp_key);
-    json_min::extractString(scope, "nonce", h.udp_nonce);
+  const char* sid = doc["session_id"];
+  h.session_id = sid ? sid : "";
+  if (!doc["sample_rate"].isNull()) {
+    int sr = doc["sample_rate"].as<int>();
+    if (sr > 0) h.sample_rate = sr;
+  }
+  if (!doc["frame_duration"].isNull()) {
+    int fd = doc["frame_duration"].as<int>();
+    if (fd > 0) h.frame_duration = fd;
+  }
+  JsonVariant udp = doc["udp"];
+  if (!udp.isNull()) {
+    const char* server = udp["server"];
+    if (server) h.udp_server = server;
+    if (!udp["port"].isNull()) h.udp_port = udp["port"].as<int>();
+    const char* key = udp["key"];
+    if (key) h.udp_key = key;
+    const char* nonce = udp["nonce"];
+    if (nonce) h.udp_nonce = nonce;
   }
   return h;
 }
@@ -90,22 +124,32 @@ inline ServerHelloMqtt parseServerHelloMqtt(const std::string& text) {
 // MCP initialize への応答 (公式 mcp_server.cc:417-430 互換)。
 inline std::string buildMcpInitializeResult(const std::string& session_id,
                                             int id) {
-  std::string m = "{\"session_id\":\"" + json_min::escape(session_id) +
-                  "\",\"type\":\"mcp\",\"payload\":{\"jsonrpc\":\"2.0\",\"id\":" +
-                  std::to_string(id) +
-                  ",\"result\":{\"protocolVersion\":\"2024-11-05\","
-                  "\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":"
-                  "\"m5stack-cores3\",\"version\":\"0.1.0\"}}}}";
-  return m;
+  JsonDocument doc;
+  doc["session_id"] = session_id;
+  doc["type"] = "mcp";
+  doc["payload"]["jsonrpc"] = "2.0";
+  doc["payload"]["id"] = id;
+  doc["payload"]["result"]["protocolVersion"] = "2024-11-05";
+  doc["payload"]["result"]["capabilities"]["tools"] = JsonObject();
+  doc["payload"]["result"]["serverInfo"]["name"] = "m5stack-cores3";
+  doc["payload"]["result"]["serverInfo"]["version"] = "0.1.0";
+  String out;
+  serializeJson(doc, out);
+  return std::string(out.c_str());
 }
 
 // MCP tools/list への応答 (空ツール一覧)。
 inline std::string buildMcpToolsListResult(const std::string& session_id,
                                            int id) {
-  std::string m = "{\"session_id\":\"" + json_min::escape(session_id) +
-                  "\",\"type\":\"mcp\",\"payload\":{\"jsonrpc\":\"2.0\",\"id\":" +
-                  std::to_string(id) + ",\"result\":{\"tools\":[]}}}";
-  return m;
+  JsonDocument doc;
+  doc["session_id"] = session_id;
+  doc["type"] = "mcp";
+  doc["payload"]["jsonrpc"] = "2.0";
+  doc["payload"]["id"] = id;
+  doc["payload"]["result"]["tools"] = JsonArray();
+  String out;
+  serializeJson(doc, out);
+  return std::string(out.c_str());
 }
 
 }  // namespace xiaozhi

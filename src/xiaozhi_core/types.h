@@ -1,12 +1,12 @@
 #pragma once
-// core/ デバイス非依存型定義。Arduino / M5 / WiFi / Preferences を含めない。
-// C++17 + STL のみ。
+// core/ デバイス非依存型定義。画面表示など通信外処理の混入を避けるための分離であり、
+// Arduino / M5Unified およびメジャーなライブラリ (ArduinoJson 等) の使用自体は許容する。
 #include <cstdint>
 #include <string>
 
 namespace xiaozhi {
 
-// min-ws-core-plan §2 依存ルール: core -> ports/Arduino/M5 include 禁止。
+// core は通信ロジックに専念し、画面・入出力デバイス依存を持ち込まない (ports 側に委譲)。
 struct DeviceIdentity {
   std::string device_id;  // WiFi.macAddress() 由来 (ports 側で生成)
   std::string client_id;  // Preferences UUID 由来 (ports 側で生成)

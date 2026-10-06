@@ -1,8 +1,9 @@
 #pragma once
 // DebugTextChannel: STTバイパス入力 (plan §4)。送信形式を IF 化し A/B 切替。
+#include <ArduinoJson.h>
+
 #include <string>
 
-#include "json_min.h"
 #include "types.h"
 
 namespace xiaozhi {
@@ -11,36 +12,53 @@ namespace xiaozhi {
 // B (サーバ拡張用): type:text
 inline std::string buildBypassText(const std::string& session_id,
                                    const std::string& text, TextFormat fmt) {
-  std::string sid = json_min::escape(session_id);
-  std::string t = json_min::escape(text);
+  JsonDocument doc;
+  doc["session_id"] = session_id;
   if (fmt == TextFormat::B_TypeText) {
-    return "{\"session_id\":\"" + sid + "\",\"type\":\"text\",\"text\":\"" +
-           t + "\"}";
+    doc["type"] = "text";
+    doc["text"] = text;
+  } else {
+    doc["type"] = "listen";
+    doc["state"] = "detect";
+    doc["text"] = text;
   }
-  return "{\"session_id\":\"" + sid +
-         "\",\"type\":\"listen\",\"state\":\"detect\",\"text\":\"" + t + "\"}";
+  String out;
+  serializeJson(doc, out);
+  return std::string(out.c_str());
 }
 
 inline std::string buildListenStart(const std::string& session_id,
                                     const std::string& mode = "manual") {
-  return "{\"session_id\":\"" + json_min::escape(session_id) +
-         "\",\"type\":\"listen\",\"state\":\"start\",\"mode\":\"" +
-         json_min::escape(mode) + "\"}";
+  JsonDocument doc;
+  doc["session_id"] = session_id;
+  doc["type"] = "listen";
+  doc["state"] = "start";
+  doc["mode"] = mode;
+  String out;
+  serializeJson(doc, out);
+  return std::string(out.c_str());
 }
 
 inline std::string buildListenStop(const std::string& session_id) {
-  return "{\"session_id\":\"" + json_min::escape(session_id) +
-         "\",\"type\":\"listen\",\"state\":\"stop\"}";
+  JsonDocument doc;
+  doc["session_id"] = session_id;
+  doc["type"] = "listen";
+  doc["state"] = "stop";
+  String out;
+  serializeJson(doc, out);
+  return std::string(out.c_str());
 }
 
 inline std::string buildAbort(const std::string& session_id,
                               const std::string& reason = "") {
-  std::string o =
-      "{\"session_id\":\"" + json_min::escape(session_id) + "\"";
+  JsonDocument doc;
+  doc["session_id"] = session_id;
+  doc["type"] = "abort";
   // abort は plan §1 D->S 状態通知のみ。reason 省略可。
   (void)reason;
-  o += ",\"type\":\"abort\"}";
-  return o;
+  String out;
+  serializeJson(doc, out);
+  return std::string(out.c_str());
 }
 
 }  // namespace xiaozhi
