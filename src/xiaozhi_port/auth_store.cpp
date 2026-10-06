@@ -4,18 +4,20 @@
 #include <Preferences.h>
 #include <WiFi.h>
 
-static const char* kNs = "board";  // 公式ファーム (board.cc) と同一 namespace
+// 公式ファーム (xiaozhi-esp32) と同一 NVS namespace ("board"/"uuid")。
+static const char* kNvsNamespace = "board";
+static const char* kUuidKey = "uuid";
 
 void AuthStore::begin() {
-  // 公式ファームの bind 済み UUID を最優先 (NVS "board"/"uuid")。
-  // 公式と同一 namespace のため、NVS を消さずに書き換えた場合は引き継がれる。
+  // 公式ファームの bind 済み UUID を最優先。
+  // 同一 namespace のため、NVS を消さずに書き換えた場合は引き継がれる.
   {
     Preferences p;
-    p.begin(kNs, true);
-    uuid_ = p.isKey("uuid") ? p.getString("uuid", "").c_str() : "";
+    p.begin(kNvsNamespace, true);
+    uuid_ = p.isKey(kUuidKey) ? p.getString(kUuidKey, "").c_str() : "";
     p.end();
   }
-  const char* src = "board";
+  const char* src = kNvsNamespace;
   if (uuid_.empty()) {
     ensureClientId();
     src = "fresh";
@@ -39,19 +41,19 @@ std::string AuthStore::makeUuid() {
 
 std::string AuthStore::ensureClientId() {
   if (!uuid_.empty()) return uuid_;
-  // 公式ファーム (xiaozhi-esp32) と同一 NVS namespace ("board"/"uuid")。
+  // 公式ファーム (xiaozhi-esp32) と同一 NVS namespace。
   // 同一デバイスで bind 済みなら bind 時の UUID を引き継ぐ。
   {
     Preferences p;
-    p.begin(kNs, true);
-    uuid_ = p.isKey("uuid") ? p.getString("uuid", "").c_str() : "";
+    p.begin(kNvsNamespace, true);
+    uuid_ = p.isKey(kUuidKey) ? p.getString(kUuidKey, "").c_str() : "";
     p.end();
     if (!uuid_.empty()) return uuid_;
   }
   uuid_ = makeUuid();
   Preferences p;
-  p.begin(kNs, false);
-  p.putString("uuid", uuid_.c_str());
+  p.begin(kNvsNamespace, false);
+  p.putString(kUuidKey, uuid_.c_str());
   p.end();
   return uuid_;
 }
