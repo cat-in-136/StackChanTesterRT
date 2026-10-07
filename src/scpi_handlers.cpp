@@ -27,6 +27,17 @@ SCPI_Parser scpi;
  *    *IDN?
  *    *LRN?
  *    *TST?
+ *    TORQ
+ *      :OFF
+ *      :ON
+ *    CHAT
+ *      :TEXT <text...>
+ *      :START
+ *      :STOP
+ *      :ABORT
+ *      :STAT?
+ *      :FORMAT A|B
+ *      :FORMAT?
  */
 void setupSCPI(void) {
   scpi.SetCommandTreeBase(F("SYSTem"));
@@ -118,16 +129,6 @@ void setupSCPI(void) {
       });
 
   scpi.SetCommandTreeBase(F(""));
-  scpi.RegisterCommand(F(":TORQ:OFF"), [](SCPI_C commands, SCPI_P parameters,
-                                          Stream &interface) {
-    servo_controller.torqueOff();
-    interface.println(F("OK"));
-  });
-  scpi.RegisterCommand(
-      F(":TORQ:ON"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
-        servo_controller.torqueOn();
-        interface.println(F("OK"));
-      });
   scpi.RegisterCommand(
       F("*IDN?"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
         const uint64_t efuseMac = ESP.getEfuseMac();
@@ -159,13 +160,21 @@ void setupSCPI(void) {
         interface.println("0"); // Not supported as of now
       });
 
-  // ---- AI Chatbot (xiaozhi-min-ws テキスト PoC) ----
-  // :CHAT:TEXT <text...>  STTバイパス送信 (plan §4, A/B形式は :CHAT:FORMAT で切替)
-  // :CHAT:START / :CHAT:STOP / :CHAT:ABORT  セッション操作
-  // :CHAT:STAT?  phase/pipe/wifi/fmt + 直近チャット表示
-  // :CHAT:FORMAT A|B / :CHAT:FORMAT?  バイパス形式切替
+  scpi.SetCommandTreeBase(F("TORQ"));
+  scpi.RegisterCommand(F(":OFF"), [](SCPI_C commands, SCPI_P parameters,
+                                          Stream &interface) {
+    servo_controller.torqueOff();
+    interface.println(F("OK"));
+  });
   scpi.RegisterCommand(
-      F(":CHAT:TEXT"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
+      F(":ON"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
+        servo_controller.torqueOn();
+        interface.println(F("OK"));
+      });
+
+  scpi.SetCommandTreeBase(F("CHAT"));
+  scpi.RegisterCommand(
+      F(":TEXT"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
         String text;
         for (size_t i = 0; i < parameters.Size(); i++) {
           if (i > 0) text += " ";
@@ -188,7 +197,7 @@ void setupSCPI(void) {
         }
       });
   scpi.RegisterCommand(
-      F(":CHAT:START"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
+      F(":START"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
         (void)commands;
         (void)parameters;
         chatbotStart();
@@ -196,7 +205,7 @@ void setupSCPI(void) {
         interface.println(chatbotStatus());
       });
   scpi.RegisterCommand(
-      F(":CHAT:STOP"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
+      F(":STOP"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
         (void)commands;
         (void)parameters;
         chatbotStop();
@@ -204,7 +213,7 @@ void setupSCPI(void) {
         interface.println(chatbotStatus());
       });
   scpi.RegisterCommand(
-      F(":CHAT:ABORT"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
+      F(":ABORT"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
         (void)commands;
         (void)parameters;
         chatbotAbort();
@@ -212,14 +221,14 @@ void setupSCPI(void) {
         interface.println(chatbotStatus());
       });
   scpi.RegisterCommand(
-      F(":CHAT:STAT?"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
+      F(":STAT?"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
         (void)commands;
         (void)parameters;
         interface.println(chatbotStatus());
         interface.println(chatbotLastChat());
       });
   scpi.RegisterCommand(
-      F(":CHAT:FORMAT"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
+      F(":FORMAT"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
         const char* p0 = parameters[0];
         if (p0 != nullptr && (p0[0] == 'B' || p0[0] == 'b')) {
           chatbotSetFormatB(true);
@@ -232,7 +241,7 @@ void setupSCPI(void) {
         }
       });
   scpi.RegisterCommand(
-      F(":CHAT:FORMAT?"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
+      F(":FORMAT?"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
         (void)commands;
         (void)parameters;
         interface.println(chatbotGetFormatB() ? F("B") : F("A"));
