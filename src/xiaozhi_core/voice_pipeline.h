@@ -46,8 +46,9 @@ class VoicePipeline {
   };
 
   Callbacks cb;
-  // 既定 Idle 復帰 (plan: Listening or Idle 選択可、既定 Idle)
-  bool tts_stop_returns_to_idle = true;
+  // 同一 session_id で TEXT を連続送信するため Listening 維持が既定。
+  // (manual でも tts/stop で Idle に落とすと 2 回目の TEXT が送れない)
+  bool tts_stop_returns_to_idle = false;
 
   VoicePipeline() : state_(PipelineState::Idle), last_rx_ms_(0) {}
 

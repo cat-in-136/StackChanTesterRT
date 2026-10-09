@@ -389,6 +389,8 @@ void sendHello() {
 }
 
 void setupPipeCallbacks() {
+  // 同一 session_id 継続: tts/stop 後も Listening 維持 (Idle に落とさない)。
+  g_pipe.tts_stop_returns_to_idle = false;
   g_pipe.cb.on_state = [](xiaozhi::PipelineState s) {
     M5_LOGI("chatbot: pipeline -> %s", xiaozhi::toStr(s));
   };
@@ -417,6 +419,8 @@ void setupPipeCallbacks() {
   g_pipe.cb.on_tts_stop = []() {
     M5_LOGI("chatbot: tts stop");
     Serial.println("CHAT TTS-STOP");
+    // 次の TEXT で listen/start から送り直すため (同一 sid 継続)。
+    g_listen_started = false;
   };
   g_pipe.cb.on_alert = [](const std::string& m) {
     M5_LOGI("chatbot: alert %.120s", m.c_str());
@@ -763,14 +767,23 @@ void loopChatbot(void) {
 
 bool chatbotSendText(const char* text) {
   if (!g_active || !text || !text[0]) return false;
+  // 同一 session_id 継続: Idle でも Ready+接続中なら送信可とする。
+  // (tts/stop 後は Listening 維持が既定だが、ABORT/STOP 直後の Idle 復帰用)。
+  // hello 未完了 (Connecting) のみ拒否する。
   if (g_phase != PhReady ||
-      g_pipe.state() == xiaozhi::PipelineState::Idle ||
       g_pipe.state() == xiaozhi::PipelineState::Connecting) {
     g_last_error = "not ready (hello not done)";
     return false;
   }
+  if (!transportConnected()) {
+    g_last_error = "not ready (transport disconnected)";
+    return false;
+  }
   const std::string& sid = g_pipe.sessionId();
-  if (sid.empty()) return false;
+  if (sid.empty()) {
+    g_last_error = "not ready (no session)";
+    return false;
+  }
   uint32_t now = millis();
   if (!g_listen_started) {
     std::string start =

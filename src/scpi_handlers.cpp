@@ -190,8 +190,9 @@ void setupSCPI(void) {
           interface.println(F("NG,empty text"));
           return;
         }
-        interface.printf("OK,send %d bytes\r\n", (int)text.length());
-        if (!chatbotSendText(text.c_str())) {
+        if (chatbotSendText(text.c_str())) {
+          interface.printf("OK,send %d bytes\r\n", (int)text.length());
+        } else {
           interface.print(F("NG,"));
           interface.println(chatbotStatus());
         }
