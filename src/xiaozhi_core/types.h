@@ -12,12 +12,7 @@ struct DeviceIdentity {
   std::string client_id;  // Preferences UUID 由来 (ports 側で生成)
 };
 
-struct ServerConfig {
-  std::string url;    // wss://.../xiaozhi/v1/
-  std::string token;  // Bearer token
-};
-
-// OTA 応答の mqtt ブロック (公式ファームは mqtt 優先)。
+// OTA 応答の mqtt ブロック。
 // subscribe_topic が "null"/空の場合は device_id から派生する
 // (devices/p2p/{mac_underscore_lower})。
 struct MqttConfig {

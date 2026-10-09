@@ -1,5 +1,5 @@
 #pragma once
-// WsSession: hello 組立・server hello 解析・10s待ち定数 (plan §3.1)
+// MqttSession: MQTT hello 組立・server hello 解析・10s待ち定数
 #include <ArduinoJson.h>
 
 #include <cstring>
@@ -12,22 +12,6 @@ namespace xiaozhi {
 // public server 固定。設定不要 (OTA URL の切替はビルド時定数で)。
 static const char DEFAULT_OTA_URL[] = "https://api.tenclass.net/xiaozhi/ota/";
 static const int kHelloTimeoutMs = 10000;
-
-// D->S hello (v1 固定)。公式は features.mcp:true が必須級。
-inline std::string buildHello() {
-  JsonDocument doc;
-  doc["type"] = "hello";
-  doc["version"] = 1;
-  doc["features"]["mcp"] = true;
-  doc["transport"] = "websocket";
-  doc["audio_params"]["format"] = "opus";
-  doc["audio_params"]["sample_rate"] = 16000;
-  doc["audio_params"]["channels"] = 1;
-  doc["audio_params"]["frame_duration"] = 60;
-  String out;
-  serializeJson(doc, out);
-  return std::string(out.c_str());
-}
 
 // D->S hello (MQTT 制御チャネル用: transport=udp, version=3)。
 // 公式 mqtt_protocol.cc GetHelloMessage 互換。UDP は後段で実装予定。
@@ -44,35 +28,6 @@ inline std::string buildMqttHello() {
   String out;
   serializeJson(doc, out);
   return std::string(out.c_str());
-}
-
-struct ServerHello {
-  std::string session_id;  // 公式は任意。空でも受理する。
-  int sample_rate = 24000;  // 下り既定 (protocol.h:79)
-  int frame_duration = 60;
-};
-
-// type==hello && transport==websocket のみ受理。session_id 欠落でも true。
-// (公式 websocket_protocol.cc:236-254 は sid 無しでも event set する)
-inline bool parseServerHello(const std::string& text, ServerHello& out) {
-  JsonDocument doc;
-  if (deserializeJson(doc, text.c_str())) return false;
-  const char* type = doc["type"];
-  if (!type || std::strcmp(type, "hello") != 0) return false;
-  const char* transport = doc["transport"];
-  if (!transport || std::strcmp(transport, "websocket") != 0) return false;
-  // session_id は任意 (公式は保存のみ)。欠落・空でも受理する。
-  const char* sid = doc["session_id"];
-  out.session_id = sid ? sid : "";
-  if (!doc["sample_rate"].isNull()) {
-    int sr = doc["sample_rate"].as<int>();
-    if (sr > 0) out.sample_rate = sr;
-  }
-  if (!doc["frame_duration"].isNull()) {
-    int fd = doc["frame_duration"].as<int>();
-    if (fd > 0) out.frame_duration = fd;
-  }
-  return true;
 }
 
 // ---- MQTT 制御チャネル (transport=udp) 用 ----

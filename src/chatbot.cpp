@@ -12,10 +12,9 @@
 #include "xiaozhi_core/activation.h"
 #include "xiaozhi_core/debug_text_channel.h"
 #include "xiaozhi_core/voice_pipeline.h"
-#include "xiaozhi_core/ws_session.h"
+#include "xiaozhi_core/mqtt_session.h"
 #include "xiaozhi_port/arduino_http.h"
 #include "xiaozhi_port/arduino_mqtt.h"
-#include "xiaozhi_port/arduino_ws.h"
 #include "xiaozhi_port/auth_store.h"
 
 extern m5avatar::Avatar avatar;
@@ -27,17 +26,15 @@ enum Phase : uint8_t {
   PhWifi,
   PhOta,
   PhActivationWait,
-  PhWsConnect,
+  PhMqttConnect,
   PhHelloWait,
   PhReady,
 };
 
 AuthStore g_auth;
-ArduinoWs g_ws;
 ArduinoMqtt g_mqtt;
 xiaozhi::VoicePipeline g_pipe;
 xiaozhi::TextFormat g_fmt = xiaozhi::TextFormat::A_DetectText;
-xiaozhi::ServerHello g_hello;
 xiaozhi::ServerHelloMqtt g_hello_mqtt;
 
 bool g_active = false;
@@ -45,16 +42,15 @@ Phase g_phase = PhIdle;
 uint32_t g_phase_since = 0;
 uint32_t g_hello_sent_ms = 0;
 uint32_t g_last_retry_ms = 0;
-// hello無応答のまま切断された連続回数。上限で自動再接続を止める
-// (test-token 等の無効クレデンシャルで無限ループしないため)。
+// hello無応答のまま切断された連続回数。上限で自動再接続を止める。
 int g_hello_fail_count = 0;
 const int kMaxHelloFails = 3;
 int g_ota_attempts = 0;
 const int kMaxOtaAttempts = 10;
 const uint32_t kOtaRetryMs = 15000;
 // activation ポーリング状態 (公式 ota.cc Activate / Web runActivation 互換)。
-// 未bind時サーバは websocket(test-token仮値)+activation{code} を同梱して返すため、
-// code有りの場合は websocket有無に関わらず activate が200になるまでWS接続しない。
+// 未bind時サーバは activation{code} を返すため、code有りの場合は
+// activate が200になるまで MQTT 接続しない。
 bool g_need_activation = false;
 std::string g_activation_code;
 uint32_t g_last_activate_ms = 0;
@@ -81,8 +77,8 @@ const char* phaseStr(Phase p) {
       return "Ota";
     case PhActivationWait:
       return "ActivationWait";
-    case PhWsConnect:
-      return "WsConnect";
+    case PhMqttConnect:
+      return "MqttConnect";
     case PhHelloWait:
       return "HelloWait";
     case PhReady:
@@ -139,41 +135,19 @@ void startWifi() {
 }
 
 // 接続情報はランタイム保持のみ (NVS 保存しない)。毎起動 OTA で取り直す。
-// 公式は mqtt ブロック優先 (application.cc:538-540) のため、
-// mqtt があれば MQTT 制御チャネル、無ければ websocket を使う。
-static std::string g_runtime_ws_url;
-static std::string g_runtime_ws_token;
+// 制御チャネルは MQTT のみ (公式 application.cc:538-540 も mqtt 優先)。
 static xiaozhi::MqttConfig g_mqtt_cfg;
 static std::string g_mqtt_sub_topic;
 
-enum Transport : uint8_t { TpNone = 0, TpWs, TpMqtt };
-static Transport g_transport = TpNone;
+bool hasRuntimeServer() { return !g_mqtt_cfg.endpoint.empty(); }
 
-bool hasRuntimeServer() {
-  return g_transport == TpMqtt || !g_runtime_ws_url.empty();
-}
+bool transportConnected() { return g_mqtt.isConnected(); }
 
-bool transportConnected() {
-  return g_transport == TpMqtt ? g_mqtt.isConnected() : g_ws.isConnected();
-}
+void transportLoop() { g_mqtt.loop(); }
 
-void transportLoop() {
-  if (g_transport == TpMqtt)
-    g_mqtt.loop();
-  else
-    g_ws.loop();
-}
+bool transportSend(const std::string& text) { return g_mqtt.sendText(text); }
 
-bool transportSend(const std::string& text) {
-  return g_transport == TpMqtt ? g_mqtt.sendText(text) : g_ws.sendText(text);
-}
-
-void transportClose() {
-  if (g_transport == TpMqtt)
-    g_mqtt.close();
-  else
-    g_ws.close();
-}
+void transportClose() { g_mqtt.close(); }
 
 // POST {ota}activate を1回実行。200=成功, 202=待機, その他=失敗。
 // 公式 ota.cc Activate / Web activate.ts 互換 (ボディは "{}" 簡易系)。
@@ -195,7 +169,7 @@ bool doActivateOnce() {
 }
 
 // TLS 検証には正しい時刻が必須。WiFi 接続後に一度だけ NTP 同期する。
-// 失敗しても fatal にしない (OTA/WSS リトライ時に再試行される)。
+// 失敗しても fatal にしない (OTA/MQTT リトライ時に再試行される)。
 bool s_time_synced = false;
 
 bool ensureTimeSync() {
@@ -236,8 +210,8 @@ void doOtaOnce() {
     Serial.printf("CHAT OTA-NG %s\r\n", g_last_error.c_str());
     return;
   }
-  // 診断: token 値をマスクして応答 body を出す。
-  // 未bind (activationのみ) / bind済 (websocket+token) の切り分け用。
+  // 診断: 応答 body と activation ブロックの中身を出す。
+  // 未bind (activation code 有り) / bind済 (mqtt ブロック有り) の切り分け用。
   {
     std::string masked = r.body;
     size_t tp = masked.find("\"token\"");
@@ -254,27 +228,21 @@ void doOtaOnce() {
     // M5_LOGD は抑制される可能性があるため Serial でも出す (実機ログで必ず見える)。
     M5_LOGI("chatbot: ota body %.500s", masked.c_str());
     Serial.printf("CHAT OTA-BODY %s\r\n", masked.c_str());
-    // activation ブロックの中身 (code/challenge/message) と token 実値を全部ログ。
-    // token はデバイス自身の資格情報であり、ダミー(test-token)か実値かの
-    // 切り分けに必須のため PoC 診断ログではマスクしない。
-    const std::string& tok = cv.server.token;
-    Serial.printf("CHAT OTA-PARSE ws=%d token=%s code=%s challenge=%s timeout_ms=%d msg=%.120s\r\n",
-                  (int)cv.has_websocket,
-                  tok.empty() ? "(none)" : tok.c_str(),
+    Serial.printf("CHAT OTA-PARSE mqtt=%d code=%s challenge=%s timeout_ms=%d msg=%.120s\r\n",
+                  (int)cv.mqtt.present,
                   cv.activation.code.empty() ? "(none)" : cv.activation.code.c_str(),
                   cv.activation.challenge.empty() ? "(none)"
                                                  : cv.activation.challenge.c_str(),
                   cv.activation.timeout_ms, cv.activation.message.c_str());
-    M5_LOGI("chatbot: ota parsed ws=%d token=%s code=%s challenge=%s timeout_ms=%d msg=%.120s",
-            (int)cv.has_websocket,
-            tok.empty() ? "(none)" : tok.c_str(),
+    M5_LOGI("chatbot: ota parsed mqtt=%d code=%s challenge=%s timeout_ms=%d msg=%.120s",
+            (int)cv.mqtt.present,
             cv.activation.code.empty() ? "(none)" : cv.activation.code.c_str(),
             cv.activation.challenge.empty() ? "(none)"
                                            : cv.activation.challenge.c_str(),
             cv.activation.timeout_ms, cv.activation.message.c_str());
   }
   if (!cv.activation.code.empty()) {
-    // 初回 (token 無し) は xiaozhi.me 用の 6桁コードを画面表示する。
+    // 初回は xiaozhi.me 用の 6桁コードを画面表示する。
     char buf[64];
     snprintf(buf, sizeof(buf), "Code:%s", cv.activation.code.c_str());
     showText(buf);
@@ -282,9 +250,7 @@ void doOtaOnce() {
             cv.activation.message.c_str());
     Serial.printf("CHAT ACTIVATION code=%s msg=%s\r\n",
                   cv.activation.code.c_str(), cv.activation.message.c_str());
-    // 未バインド: websocket 有無に関わらず activate が200になるまで待つ。
-    // (公式 ota.cc:502 / Web activate.ts: サーバは code 提示中も仮 token を
-    // 同梱するため、websocket 有りでも test-token のまま接続しては無言切断される)
+    // 未バインド: activate が200になるまで MQTT 接続しない。
     g_need_activation = true;
     g_activation_code = cv.activation.code;
     g_activate_attempts = 0;
@@ -293,9 +259,7 @@ void doOtaOnce() {
     return;
   }
   g_need_activation = false;
-  // トランスポート選択: 公式は mqtt ブロック優先 (application.cc:538-540)。
-  // mqtt があれば MQTT 制御チャネル (websocket.token は test-token のダミーで
-  // 実接続不可のため、mqtt が無い場合のみ websocket にフォールバック)。
+  // 制御チャネルは MQTT のみ (公式 application.cc:538-540 も mqtt 優先)。
   if (cv.mqtt.present && !cv.mqtt.endpoint.empty()) {
     g_mqtt_cfg = cv.mqtt;
     g_mqtt_sub_topic = cv.mqtt.subscribe_topic;
@@ -307,66 +271,34 @@ void doOtaOnce() {
         g_mqtt_sub_topic += c;
       }
     }
-    g_transport = TpMqtt;
     M5_LOGI("chatbot: ota ok, mqtt transport (endpoint=%s pub=%s sub=%s)",
             cv.mqtt.endpoint.c_str(), cv.mqtt.publish_topic.c_str(),
             g_mqtt_sub_topic.c_str());
     Serial.printf("CHAT OTA-TRANSPORT mqtt sub=%s\r\n",
                   g_mqtt_sub_topic.c_str());
     g_last_error.clear();
-    setPhase(PhWsConnect);
+    setPhase(PhMqttConnect);
     return;
   }
-  if (cv.has_websocket) {
-    g_runtime_ws_url = cv.server.url;
-    g_runtime_ws_token = cv.server.token;
-    g_transport = TpWs;
-    M5_LOGI("chatbot: ota ok, websocket transport (no mqtt block)");
-    Serial.println("CHAT OTA-TRANSPORT websocket");
-    g_last_error.clear();
-    setPhase(PhWsConnect);
-    return;
-  }
-  g_last_error = "ota: no usable transport";
+  // websocket は test-token 固定ダミーのため使えない。mqtt 無しは異常系。
+  g_last_error = "ota: no usable transport (mqtt missing)";
   M5_LOGE("chatbot: %s", g_last_error.c_str());
 }
 
-void connectWs() {
-  xiaozhi::DeviceIdentity id = g_auth.identity();
-  if (g_transport == TpMqtt) {
-    if (g_mqtt_cfg.endpoint.empty()) {
-      setPhase(PhOta);
-      return;
-    }
-    M5_LOGI("chatbot: mqtt connect %s (client %s)", g_mqtt_cfg.endpoint.c_str(),
-            g_mqtt_cfg.client_id.c_str());
-    // on_open が sendHello -> PhHelloWait へ遷移させるため、
-    // 先に PhWsConnect を立ててから begin する (上書き防止)。
-    setPhase(PhWsConnect);
-    g_last_retry_ms = millis();
-    if (!g_mqtt.begin(g_mqtt_cfg, g_mqtt_sub_topic)) {
-      if (g_phase == PhWsConnect) {
-        g_last_error = "mqtt connect failed";
-        M5_LOGE("chatbot: %s", g_last_error.c_str());
-      }
-      return;
-    }
-    return;
-  }
-  if (g_runtime_ws_url.empty()) {
+void connectMqtt() {
+  if (g_mqtt_cfg.endpoint.empty()) {
     setPhase(PhOta);
     return;
   }
-  M5_LOGI("chatbot: wss connect %.60s...", g_runtime_ws_url.c_str());
-  // on_open (非同期) が sendHello -> PhHelloWait へ遷移させるため、
-  // 先に PhWsConnect を立ててから begin する (上書き防止)。
-  setPhase(PhWsConnect);
+  M5_LOGI("chatbot: mqtt connect %s (client %s)", g_mqtt_cfg.endpoint.c_str(),
+          g_mqtt_cfg.client_id.c_str());
+  // on_open が sendHello -> PhHelloWait へ遷移させるため、
+  // 先に PhMqttConnect を立ててから begin する (上書き防止)。
+  setPhase(PhMqttConnect);
   g_last_retry_ms = millis();
-  if (!g_ws.begin(g_runtime_ws_url, g_runtime_ws_token, id.device_id,
-                  id.client_id)) {
-    // ArduinoWs::begin 失敗 = URL parse失敗。再試行は loop 側。
-    if (g_phase == PhWsConnect) {
-      g_last_error = "wss connect failed";
+  if (!g_mqtt.begin(g_mqtt_cfg, g_mqtt_sub_topic)) {
+    if (g_phase == PhMqttConnect) {
+      g_last_error = "mqtt connect failed";
       M5_LOGE("chatbot: %s", g_last_error.c_str());
     }
     return;
@@ -374,8 +306,7 @@ void connectWs() {
 }
 
 void sendHello() {
-  std::string hello = (g_transport == TpMqtt) ? xiaozhi::buildMqttHello()
-                                              : xiaozhi::buildHello();
+  std::string hello = xiaozhi::buildMqttHello();
   g_pipe.startSession(millis());
   setPhase(PhHelloWait);
   g_hello_sent_ms = millis();
@@ -383,7 +314,7 @@ void sendHello() {
     g_last_error = "hello send failed (not connected)";
     M5_LOGE("chatbot: %s", g_last_error.c_str());
   } else {
-    M5_LOGI("chatbot: hello sent (%s)", g_transport == TpMqtt ? "mqtt" : "ws");
+    M5_LOGI("chatbot: hello sent");
   }
   g_listen_started = false;
 }
@@ -433,7 +364,7 @@ void setupPipeCallbacks() {
     transportClose();
     g_listen_started = false;
     if (g_active) {
-      setPhase(PhWsConnect);
+      setPhase(PhMqttConnect);
       g_last_retry_ms = millis();
     }
   };
@@ -445,7 +376,7 @@ void setupPipeCallbacks() {
     g_last_error = "120s rx timeout -> Idle";
     M5_LOGI("chatbot: %s", g_last_error.c_str());
     transportClose();
-    setPhase(PhWsConnect);
+    setPhase(PhMqttConnect);
     g_last_retry_ms = millis();
   };
 }
@@ -534,80 +465,17 @@ void setupMqttCallbacks() {
       if (g_hello_fail_count >= kMaxHelloFails) {
         g_last_error = "mqtt hello rejected";
         M5_LOGE("chatbot: %s x%d", g_last_error.c_str(), g_hello_fail_count);
-        Serial.printf("CHAT WS-REJECT %s\r\n", g_last_error.c_str());
-        showText("WS reject");
+        Serial.printf("CHAT MQTT-REJECT %s\r\n", g_last_error.c_str());
+        showText("MQTT reject");
         setPhase(PhIdle);
         return;
       }
     }
-    setPhase(PhWsConnect);
+    setPhase(PhMqttConnect);
     g_last_retry_ms = millis();
   };
   g_mqtt.ev.on_error = [](const std::string& msg) {
     M5_LOGW("chatbot: mqtt error %.160s", msg.c_str());
-  };
-}
-
-void setupWsCallbacks() {
-  g_ws.ev.on_open = []() {
-    M5_LOGI("chatbot: ws open");
-    sendHello();
-  };
-  g_ws.ev.on_text = [](const std::string& text) {
-    uint32_t now = millis();
-    // Connecting 中は server hello として解釈
-    if (g_pipe.state() == xiaozhi::PipelineState::Connecting) {
-      xiaozhi::ServerHello h;
-      if (xiaozhi::parseServerHello(text, h)) {
-        g_hello = h;
-        g_pipe.onHelloOk(h.session_id, now);
-        g_hello_fail_count = 0;
-        setPhase(PhReady);
-        showText("Ready");
-        M5_LOGI("chatbot: hello ok sid=%.16s sr=%d", h.session_id.c_str(),
-                h.sample_rate);
-        Serial.printf("CHAT HELLO-OK sid=%s sr=%d\r\n", h.session_id.c_str(),
-                      h.sample_rate);
-      } else {
-        M5_LOGD("chatbot: ignore non-hello during Connecting: %.120s",
-                text.c_str());
-      }
-      return;
-    }
-    xiaozhi::ServerEvent ev = g_pipe.onText(text, now);
-    if (ev.kind == xiaozhi::ServerEvent::Kind::None) {
-      M5_LOGD("chatbot: ignore rx: %.160s", text.c_str());
-    }
-  };
-  g_ws.ev.on_binary = [](const uint8_t* data, size_t len) {
-    (void)data;
-    bool play = g_pipe.onBinary(len, millis());
-    // PoC: 再生せずサイズのみログ。Speaking 以外は破棄則どおり捨てる。
-    M5_LOGD("chatbot: bin %u bytes %s", (unsigned)len,
-            play ? "(speaking)" : "(dropped)");
-  };
-  g_ws.ev.on_close = []() {
-    M5_LOGI("chatbot: ws closed");
-    g_pipe.stopSession("close", millis());
-    if (!g_active || g_phase == PhIdle) return;
-    if (g_phase == PhHelloWait) {
-      // server hello を受ける前に切られた = hello リジェクト。
-      // 連続したら自動再接続を止めて Idle に落とす (手動 retry は可)。
-      g_hello_fail_count++;
-      if (g_hello_fail_count >= kMaxHelloFails) {
-        g_last_error = "ws hello rejected (check bind/token)";
-        M5_LOGE("chatbot: %s x%d", g_last_error.c_str(), g_hello_fail_count);
-        Serial.printf("CHAT WS-REJECT %s\r\n", g_last_error.c_str());
-        showText("WS reject");
-        setPhase(PhIdle);
-        return;
-      }
-    }
-    setPhase(PhWsConnect);
-    g_last_retry_ms = millis();
-  };
-  g_ws.ev.on_error = [](const std::string& msg) {
-    M5_LOGW("chatbot: ws error %.160s", msg.c_str());
   };
 }
 
@@ -617,18 +485,14 @@ void setupChatbot(void) {
   g_active = true;
   g_auth.begin();
   setupPipeCallbacks();
-  setupWsCallbacks();
   setupMqttCallbacks();
   // expression は変えない (scaffold につき Neutral のまま)。
   showText("Chatbot...");
   // 画面ログの抑止は changeOperationMode の共通処理に委譲
   // (Avatar 稼働中は display ターゲットを ESP_LOG_NONE にする)。
   M5_LOGI("chatbot: setup ota=%s", xiaozhi::DEFAULT_OTA_URL);
-  g_runtime_ws_url.clear();
-  g_runtime_ws_token.clear();
   g_mqtt_cfg = xiaozhi::MqttConfig{};
   g_mqtt_sub_topic.clear();
-  g_transport = TpNone;
   if (!ensureWifi()) {
     startWifi();
     setPhase(PhWifi);
@@ -695,8 +559,6 @@ void loopChatbot(void) {
       }
       break;
     case PhActivationWait:
-      // バインド待ち: 未bindなら activate を 200 までポーリングし、
-      // 成功後に OTA 取り直し (実 token 取得) してから接続する。
       if (g_need_activation) {
         if (now - g_last_activate_ms > kActivateIntervalMs) {
           g_last_activate_ms = now;
@@ -705,7 +567,7 @@ void loopChatbot(void) {
             g_need_activation = false;
             g_activation_code.clear();
             g_ota_attempts = 0;
-            setPhase(PhOta);  // 再OTAで実 websocket token を取得
+            setPhase(PhOta);
           } else if (g_activate_attempts >= kMaxActivateAttempts) {
             g_last_error = "activation timeout (bind at xiaozhi.me?)";
             M5_LOGE("chatbot: %s", g_last_error.c_str());
@@ -714,7 +576,6 @@ void loopChatbot(void) {
         }
         break;
       }
-      // bind済み (websocket 同梱で code 無し) は OTA 再試行で取得を待つ。
       if (now - g_last_retry_ms > kOtaRetryMs) {
         if (g_ota_attempts >= kMaxOtaAttempts) {
           g_last_error = "activation timeout (bind at xiaozhi.me?)";
@@ -726,36 +587,30 @@ void loopChatbot(void) {
         }
       } else if (g_phase == PhActivationWait && hasRuntimeServer() &&
                  !transportConnected()) {
-        // 接続情報同梱で返った直後は接続試行
-        connectWs();
+        connectMqtt();
       }
       break;
-    case PhWsConnect:
-      // now は transportLoop() 後の fresh 値 (HelloWait と同じ理由)。
+    case PhMqttConnect:
       if (!transportConnected() && now - g_last_retry_ms > 5000u) {
-        // 接続再試行は chatbot 側で作り直す (ライブラリ側の自動再接続は
-        // ArduinoWs で 10s に抑止)。
-        connectWs();
+        connectMqtt();
       }
       break;
     case PhHelloWait:
-      // now は g_ws.loop() 後の fresh 値 (関数先頭で取得)。stale 値だと
-      // sendHello() 更新時刻より小さくなり符号なしアンダーフローする。
       if (now - g_hello_sent_ms > (uint32_t)xiaozhi::kHelloTimeoutMs) {
         g_last_error = "hello timeout";
         M5_LOGE("chatbot: %s", g_last_error.c_str());
         g_pipe.onHelloFailed(now);
         g_hello_fail_count++;
         if (g_hello_fail_count >= kMaxHelloFails) {
-          g_last_error = "ws hello rejected (check bind/token)";
+          g_last_error = "mqtt hello rejected";
           M5_LOGE("chatbot: %s x%d", g_last_error.c_str(), g_hello_fail_count);
-          Serial.printf("CHAT WS-REJECT %s\r\n", g_last_error.c_str());
-          showText("WS reject");
+          Serial.printf("CHAT MQTT-REJECT %s\r\n", g_last_error.c_str());
+          showText("MQTT reject");
           setPhase(PhIdle);
           break;
         }
         transportClose();
-        setPhase(PhWsConnect);
+        setPhase(PhMqttConnect);
         g_last_retry_ms = now;
       }
       break;
@@ -815,13 +670,13 @@ void chatbotStart(void) {
     return;
   }
   if (!transportConnected()) {
-    connectWs();
+    connectMqtt();
     return;
   }
   // 公式は毎回 OpenAudioChannel->hello で session 更新。旧 sid 再利用はしない。
   // Idle なら再接続からやり直す。
   if (g_pipe.state() == xiaozhi::PipelineState::Idle) {
-    connectWs();
+    connectMqtt();
     return;
   }
 }
@@ -843,7 +698,7 @@ void chatbotAbort(void) {
   transportClose();
   g_listen_started = false;
   if (g_active) {
-    setPhase(PhWsConnect);
+    setPhase(PhMqttConnect);
     g_last_retry_ms = millis();
   }
 }

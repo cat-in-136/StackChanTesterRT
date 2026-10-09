@@ -1,7 +1,7 @@
 #pragma once
 // ports/arduino-cores3: AuthStore (plan §5)
 // NVS 保存は uuid (Client-Id) のみ。
-// OTA URL は public server 固定 (xiaozhi::DEFAULT_OTA_URL)、websocket url/token
+// OTA URL は public server 固定 (xiaozhi::DEFAULT_OTA_URL)、MQTT 接続情報
 // は毎起動 OTA で取得しランタイム保持のみ (NVS 保存しない)。
 #include <string>
 

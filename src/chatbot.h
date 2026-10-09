@@ -1,6 +1,6 @@
 #pragma once
 // UiShell + main 結線相当 (plan §5): Chatbot モードの orchestrator。
-// テキスト PoC 範囲: OTA -> WSS -> hello -> listen検出(text) -> stt/llm/tts字幕。
+// テキスト PoC 範囲: OTA -> MQTT -> hello -> listen検出(text) -> stt/llm/tts字幕。
 // Opus 再生は対象外 (バイナリはサイズのみログ)。
 
 void setupChatbot(void);
