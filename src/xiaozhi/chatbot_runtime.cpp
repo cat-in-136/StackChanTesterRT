@@ -99,7 +99,86 @@ bool ChatbotRuntime::hasRuntimeServer() const {
 
 bool ChatbotRuntime::transportConnected() { return mqtt_.isConnected(); }
 
-void ChatbotRuntime::transportLoop() { mqtt_.loop(); }
+void ChatbotRuntime::transportLoop() {
+  mqtt_.loop();
+  if (!udp_.active()) return;
+  // UDP下りポーリング。再生可否は VoicePipeline の破棄則
+  // (Speakingのみ再生) に従う。120s無受信の更新も onBinary が行う。
+  uint32_t now = millis();
+  udp_.loop(
+      [this, now](const uint8_t* opus, size_t len, uint32_t ts, bool gap) {
+        (void)ts;
+        bool speaking = pipe_.onBinary(len, now);
+        if (!speaking) return;
+        if (!player_.ready()) return;
+        if (gap) player_.playConcealment();
+        player_.play(opus, len);
+      },
+      now);
+}
+
+// hello応答の udp{server,port,key,nonce} で音声下りを開く。
+// mic-less のため server は上り datagram の source を下り送出先にする:
+// 直後に無音フレームの punch を送り NAT マッピング+endpoint学習を行う。
+void ChatbotRuntime::openUdpAudio() {
+  closeUdpAudio();
+  if (hello_mqtt_.udp_server.empty() || hello_mqtt_.udp_port <= 0) {
+    M5_LOGI("chatbot: no udp endpoint in hello (voice off)");
+    return;
+  }
+  if (!udp_.begin(hello_mqtt_.udp_server, hello_mqtt_.udp_port,
+                  hello_mqtt_.udp_key, hello_mqtt_.udp_nonce)) {
+    M5_LOGE("chatbot: udp open failed");
+    return;
+  }
+  int sr = hello_mqtt_.sample_rate > 0 ? hello_mqtt_.sample_rate : 24000;
+  if (!player_.begin(sr)) {
+    M5_LOGE("chatbot: opus player init failed");
+    udp_.end();
+    return;
+  }
+  punchIfStale(millis(), true);
+}
+
+void ChatbotRuntime::closeUdpAudio() {
+  player_.stop();
+  closeMouth();
+  if (udp_.active()) udp_.end();
+}
+
+void ChatbotRuntime::punchIfStale(uint32_t now, bool force) {
+  if (!udp_.active() || !player_.ready()) return;
+  if (!force && now - last_punch_ms_ < 10000u) return;
+  // 空ペイロード keepalive (16B header のみ)。
+  // 目的は NAT マッピング + server の下り送出先学習であり、
+  // 空入力の decode 失敗は server 側で routine drop される想定。
+  // (同梱libopusはデコーダ専用のため無音Opus生成は不可)
+  if (udp_.punch(nullptr, 0, now)) last_punch_ms_ = now;
+}
+
+void ChatbotRuntime::driveMouth(uint32_t now) {
+  // Speaking+再生中のみ180msトグル (StackChan SpeakingModifier相当)。
+  // setExpression は呼ばない (Avatar停止中の禁止制約)。
+  bool talking = (phase_ == PhReady &&
+                  pipe_.state() == PipelineState::Speaking &&
+                  player_.isPlaying());
+  if (talking) {
+    if (now - mouth_last_ms_ > 180u) {
+      mouth_last_ms_ = now;
+      mouth_open_ = !mouth_open_;
+      avatar.setMouthOpenRatio(mouth_open_ ? 0.7f : 0.0f);
+    }
+  } else if (mouth_open_) {
+    closeMouth();
+  }
+}
+
+void ChatbotRuntime::closeMouth() {
+  if (mouth_open_) {
+    mouth_open_ = false;
+    avatar.setMouthOpenRatio(0.0f);
+  }
+}
 
 bool ChatbotRuntime::transportSend(const std::string& text) {
   return mqtt_.sendText(text);
@@ -300,13 +379,18 @@ void ChatbotRuntime::setupPipeCallbacks() {
     applyEmotion(e);
     Serial.printf("CHAT LLM emotion=%s\r\n", e.c_str());
   };
-  pipe_.cb.on_tts_start = []() {
+  pipe_.cb.on_tts_start = [this]() {
     M5_LOGI("chatbot: tts start (uplink muted)");
     Serial.println("CHAT TTS-START");
+    // Speaking 入口でデコーダ状態リセット (公式 ResetDecoder 相当)。
+    player_.reset();
   };
   pipe_.cb.on_tts_stop = [this]() {
     M5_LOGI("chatbot: tts stop");
     Serial.println("CHAT TTS-STOP");
+    // 再生キュー破棄 (即時停止) + 口を閉じる。
+    player_.stop();
+    closeMouth();
     // 次の TEXT で listen/start から送り直すため (同一 sid 継続)。
     listen_started_ = false;
   };
@@ -319,6 +403,7 @@ void ChatbotRuntime::setupPipeCallbacks() {
     M5_LOGI("chatbot: goodbye -> reconnect");
     Serial.println("CHAT GOODBYE");
     transportClose();
+    closeUdpAudio();
     listen_started_ = false;
     if (active_) {
       setPhase(PhMqttConnect);
@@ -333,6 +418,7 @@ void ChatbotRuntime::setupPipeCallbacks() {
     last_error_ = "120s rx timeout -> Idle";
     M5_LOGI("chatbot: %s", last_error_.c_str());
     transportClose();
+    closeUdpAudio();
     setPhase(PhMqttConnect);
     last_retry_ms_ = millis();
   };
@@ -400,6 +486,7 @@ void ChatbotRuntime::setupMqttCallbacks() {
         Serial.printf("CHAT HELLO-OK sid=%s sr=%d udp=%s:%d\r\n",
                       h.session_id.c_str(), h.sample_rate, h.udp_server.c_str(),
                       h.udp_port);
+        openUdpAudio();
       } else {
         M5_LOGD("chatbot: ignore non-hello during Connecting: %.120s",
                 text.c_str());
@@ -414,6 +501,7 @@ void ChatbotRuntime::setupMqttCallbacks() {
   mqtt_.ev.on_close = [this]() {
     M5_LOGI("chatbot: mqtt closed");
     pipe_.stopSession("close", millis());
+    closeUdpAudio();
     if (!active_ || phase_ == PhIdle) return;
     if (phase_ == PhHelloWait) {
       hello_fail_count_++;
@@ -465,6 +553,8 @@ void ChatbotRuntime::setup() {
 void ChatbotRuntime::teardown() {
   active_ = false;
   transportClose();
+  closeUdpAudio();
+  player_.end();
   pipe_.abort(millis());
   setPhase(PhIdle);
   WiFi.disconnect(true);
@@ -480,6 +570,7 @@ void ChatbotRuntime::loop() {
   // アンダーフローで hello即timeout / 即再接続を誤発火する。
   uint32_t now = millis();
   pipe_.checkTimeout(now);
+  driveMouth(now);
 
   switch (phase_) {
     case PhWifi:
@@ -598,6 +689,8 @@ bool ChatbotRuntime::sendText(const char* text) {
     if (!transportSend(start)) return false;
     listen_started_ = true;
   }
+  // NAT維持: 下りUDPの送出先学習を保つため無音punchを適宜送る。
+  punchIfStale(now);
   std::string msg = buildBypassText(sid, text, fmt_);
   bool ok = transportSend(msg);
   if (ok) {
@@ -638,6 +731,8 @@ void ChatbotRuntime::stop() {
   std::string s = buildListenStop(pipe_.sessionId());
   transportSend(s);
   pipe_.stopSession("stop", millis());
+  player_.stop();
+  closeMouth();
   listen_started_ = false;
 }
 
@@ -648,6 +743,7 @@ void ChatbotRuntime::abort() {
   }
   pipe_.abort(millis());
   transportClose();
+  closeUdpAudio();
   listen_started_ = false;
   if (active_) {
     setPhase(PhMqttConnect);
@@ -666,9 +762,10 @@ bool ChatbotRuntime::getFormatB() const {
 
 std::string ChatbotRuntime::status() const {
   char buf[160];
-  snprintf(buf, sizeof(buf), "phase=%s pipe=%s wifi=%d fmt=%s",
+  snprintf(buf, sizeof(buf), "phase=%s pipe=%s wifi=%d fmt=%s udp=%d rx=%lu",
            phaseStr(phase_), toStr(pipe_.state()), (int)WiFi.status(),
-           fmt_ == TextFormat::A_DetectText ? "A" : "B");
+           fmt_ == TextFormat::A_DetectText ? "A" : "B",
+           udp_.active() ? 1 : 0, (unsigned long)udp_.rxCount());
   return std::string(buf);
 }
 

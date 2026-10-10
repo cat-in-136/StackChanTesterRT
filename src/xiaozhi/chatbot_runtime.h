@@ -16,6 +16,8 @@
 #include "arduino/auth_store.h"
 #include "arduino/mqtt.h"
 #include "arduino/network.h"
+#include "arduino/opus_player.h"
+#include "arduino/udp_audio.h"
 
 namespace xiaozhi {
 
@@ -59,6 +61,14 @@ class ChatbotRuntime {
   bool doActivateOnce();
   void connectMqtt();
   void sendHello();
+  // UDP音声下りの開始 (hello応答の udp{} 使用)。NAT punch 含む。
+  void openUdpAudio();
+  void closeUdpAudio();
+  // NAT維持用: 最終送信から10s以上なら無音フレームを1発送る。
+  void punchIfStale(uint32_t now, bool force = false);
+  // Speaking中の口パク駆動 (180msトグル)。loop から呼ぶ。
+  void driveMouth(uint32_t now);
+  void closeMouth();
   void setupPipeCallbacks();
   void setupMqttCallbacks();
   bool tryHandleMcp(const std::string& text);
@@ -72,6 +82,8 @@ class ChatbotRuntime {
   AuthStore auth_;
   Mqtt mqtt_;
   VoicePipeline pipe_;
+  UdpAudio udp_;
+  OpusPlayer player_;
   TextFormat fmt_ = TextFormat::A_DetectText;
   ServerHelloMqtt hello_mqtt_;
 
@@ -97,6 +109,10 @@ class ChatbotRuntime {
   bool listen_started_ = false;
 
   bool time_synced_ = false;
+
+  uint32_t last_punch_ms_ = 0;
+  uint32_t mouth_last_ms_ = 0;
+  bool mouth_open_ = false;
 
   // status()/lastChat() 用の静的バッファ。
   char status_buf_[160];
