@@ -5,7 +5,7 @@
 // は毎起動 OTA で取得しランタイム保持のみ (NVS 保存しない)。
 #include <string>
 
-#include "../xiaozhi_core/types.h"
+#include "../core/types.h"
 
 class AuthStore {
  public:

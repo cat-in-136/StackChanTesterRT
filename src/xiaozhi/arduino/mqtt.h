@@ -8,9 +8,9 @@
 #include <PubSubClient.h>
 #include <WiFiClientSecure.h>
 
-#include "../xiaozhi_core/types.h"
+#include "../core/types.h"
 
-class ArduinoMqtt {
+class Mqtt {
  public:
   struct Events {
     std::function<void()> on_open;
@@ -20,7 +20,7 @@ class ArduinoMqtt {
   };
   Events ev;
 
-  ArduinoMqtt();
+  Mqtt();
   // 同期接続 (TCP+TLS+CONNECT+SUBSCRIBE)。成功で ev.on_open を fire。
   // 戻り値は接続・購読成功可否。失敗時は isConnected()=false でリトライ待ち。
   bool begin(const xiaozhi::MqttConfig& cfg,

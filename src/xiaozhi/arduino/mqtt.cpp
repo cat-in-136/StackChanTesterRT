@@ -1,6 +1,6 @@
-#include "arduino_mqtt.h"
+#include "mqtt.h"
 
-#include "tls_bundle.h"
+#include "network.h"
 
 #include <PubSubClient.h>
 #include <WiFiClientSecure.h>
@@ -8,15 +8,15 @@
 // PubSubClient ラッパ。制御チャネル (hello / mcp / listen / tts) 用。
 // subscribe_topic_ は begin() に渡された完成値を使用 (chatbot 側で派生)。
 
-ArduinoMqtt::ArduinoMqtt() { mqtt_.setClient(tls_); }
+Mqtt::Mqtt() { mqtt_.setClient(tls_); }
 
-void ArduinoMqtt::onMessage(const std::string& /*topic*/,
+void Mqtt::onMessage(const std::string& /*topic*/,
                             const uint8_t* payload, size_t len) {
   std::string text((const char*)payload, len);
   if (ev.on_text) ev.on_text(text);
 }
 
-bool ArduinoMqtt::begin(const xiaozhi::MqttConfig& cfg,
+bool Mqtt::begin(const xiaozhi::MqttConfig& cfg,
                         const std::string& subscribe_topic) {
   if (cfg.endpoint.empty()) return false;
   std::string host = cfg.endpoint;
@@ -58,7 +58,7 @@ bool ArduinoMqtt::begin(const xiaozhi::MqttConfig& cfg,
   return true;
 }
 
-void ArduinoMqtt::loop() {
+void Mqtt::loop() {
   if (!mqtt_.connected()) return;  // 切断済み: 再接続は chatbot 側リトライ
   mqtt_.loop();
   if (!mqtt_.connected()) {
@@ -66,7 +66,7 @@ void ArduinoMqtt::loop() {
   }
 }
 
-bool ArduinoMqtt::sendText(const std::string& text) {
+bool Mqtt::sendText(const std::string& text) {
   if (!mqtt_.connected()) return false;
   bool ok = mqtt_.publish(publish_topic_.c_str(), text.c_str(), false);
   // mbedTLS の送信バッファは次の read までフラッシュされない場合がある。
@@ -76,7 +76,7 @@ bool ArduinoMqtt::sendText(const std::string& text) {
   return ok;
 }
 
-void ArduinoMqtt::close() {
+void Mqtt::close() {
   mqtt_.disconnect();
   tls_.stop();
 }

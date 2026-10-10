@@ -1,5 +1,4 @@
-#include "arduino_http.h"
-#include "tls_bundle.h"
+#include "network.h"
 
 #include <HTTPClient.h>
 #include <WiFiClientSecure.h>
