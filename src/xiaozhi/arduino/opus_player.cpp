@@ -30,6 +30,7 @@ bool OpusPlayer::begin(int sampleRate) {
     return false;
   }
   play_fail_logged_ = 0;
+  diag_logged_ = 0;
   M5_LOGI("opus: decoder sr=%d mono", sample_rate_);
   return true;
 }
@@ -44,6 +45,16 @@ void OpusPlayer::end() {
 
 bool OpusPlayer::play(const uint8_t* opus, size_t len) {
   if (!od_ || !opus || len == 0 || len > 1500) return false;
+  // 監視用: セッション先頭3フレームは decode 前後のスタック残量を出す。
+  // opus_decode 1発で約4KB消費するため、loopTask 8KB既定では overflow で
+  // 落ちる (Backtrace破損→再起動を確認済み)。platformio.ini で loopTask を
+  // 32KB に拡大して対処。残量の後退があればここで検知できる。
+  bool diag = diag_logged_ < 3;
+  if (diag) diag_logged_++;
+  if (diag) {
+    M5_LOGD("opus: pre-decode len=%u hwm=%u", (unsigned)len,
+            (unsigned)uxTaskGetStackHighWaterMark(nullptr));
+  }
   int samples =
       opus_decode(od_, opus, (opus_int32)len, pcm_, kMaxFrameSamples, 0);
   if (samples <= 0) {
@@ -55,6 +66,10 @@ bool OpusPlayer::play(const uint8_t* opus, size_t len) {
   }
   if (!M5.Speaker.isEnabled()) {
     M5.Speaker.begin();
+  }
+  if (diag) {
+    M5_LOGD("opus: decoded samples=%d hwm=%u", samples,
+            (unsigned)uxTaskGetStackHighWaterMark(nullptr));
   }
   // mono のまま再生 (stereo アップミックス不要)。
   bool ok = M5.Speaker.playRaw(pcm_, (size_t)samples,

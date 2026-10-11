@@ -89,6 +89,7 @@ bool UdpAudio::begin(const std::string& server, int port,
   local_seq_ = 0;
   rx_count_ = 0;
   drop_count_ = 0;
+  tx_count_ = 0;
   logged_packets_ = 0;
   logged_remote_ = false;
   active_ = true;
@@ -133,7 +134,9 @@ bool UdpAudio::sendDatagram(const uint8_t* payload, size_t len,
   if (udp_.beginPacket(remote_ip_, remote_port_) != 1) return false;
   udp_.write(hdr, sizeof(hdr));
   if (len > 0) udp_.write(enc, len);
-  return udp_.endPacket() == 1;
+  if (udp_.endPacket() != 1) return false;
+  tx_count_++;
+  return true;
 }
 
 bool UdpAudio::punch(const uint8_t* payload, size_t len, uint32_t now_ms) {

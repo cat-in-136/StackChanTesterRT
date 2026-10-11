@@ -37,6 +37,7 @@ class UdpAudio {
 
   uint32_t rxCount() const { return rx_count_; }
   uint32_t dropCount() const { return drop_count_; }
+  uint32_t txCount() const { return tx_count_; }
 
  private:
   static bool hexToBytes(const std::string& hex, uint8_t* out, size_t out_len);
@@ -57,6 +58,7 @@ class UdpAudio {
   uint32_t local_seq_ = 0;
   uint32_t rx_count_ = 0;
   uint32_t drop_count_ = 0;
+  uint32_t tx_count_ = 0;
   uint32_t logged_packets_ = 0;
   bool logged_remote_ = false;
 

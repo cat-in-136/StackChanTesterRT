@@ -42,4 +42,5 @@ class OpusPlayer {
   int sample_rate_ = 24000;
   int16_t pcm_[kMaxFrameSamples];
   uint32_t play_fail_logged_ = 0;
+  uint32_t diag_logged_ = 0;
 };

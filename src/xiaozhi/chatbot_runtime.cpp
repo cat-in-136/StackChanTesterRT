@@ -9,6 +9,8 @@
 
 #include <cstring>
 
+#include "arduino/silent_opus.h"
+
 extern m5avatar::Avatar avatar;
 
 namespace xiaozhi {
@@ -149,11 +151,11 @@ void ChatbotRuntime::closeUdpAudio() {
 void ChatbotRuntime::punchIfStale(uint32_t now, bool force) {
   if (!udp_.active() || !player_.ready()) return;
   if (!force && now - last_punch_ms_ < 10000u) return;
-  // 空ペイロード keepalive (16B header のみ)。
-  // 目的は NAT マッピング + server の下り送出先学習であり、
-  // 空入力の decode 失敗は server 側で routine drop される想定。
-  // (同梱libopusはデコーダ専用のため無音Opus生成は不可)
-  if (udp_.punch(nullptr, 0, now)) last_punch_ms_ = now;
+  // 無音Opus上り (16kHz mono 60ms) を送る。目的は NAT マッピング +
+  // server の下り送出先学習。空ペイロード (header のみ) では server に
+  // 捨てられ UDP-RX が来ないことを実機で確認したため、必ず音声付きで送る。
+  if (udp_.punch(kSilentOpus60ms, kSilentOpus60msLen, now))
+    last_punch_ms_ = now;
 }
 
 void ChatbotRuntime::driveMouth(uint32_t now) {
@@ -384,6 +386,8 @@ void ChatbotRuntime::setupPipeCallbacks() {
     Serial.println("CHAT TTS-START");
     // Speaking 入口でデコーダ状態リセット (公式 ResetDecoder 相当)。
     player_.reset();
+    // 下り送出先の学習し直し: 無音上りを1発送る (NAT維持)。
+    punchIfStale(millis(), true);
   };
   pipe_.cb.on_tts_stop = [this]() {
     M5_LOGI("chatbot: tts stop");
@@ -659,6 +663,9 @@ void ChatbotRuntime::loop() {
       }
       break;
     case PhReady:
+      // NAT維持: 下り送出先学習を保つため無音punchを定期送信。
+      punchIfStale(now);
+      break;
     case PhIdle:
       break;
   }
@@ -762,10 +769,11 @@ bool ChatbotRuntime::getFormatB() const {
 
 std::string ChatbotRuntime::status() const {
   char buf[160];
-  snprintf(buf, sizeof(buf), "phase=%s pipe=%s wifi=%d fmt=%s udp=%d rx=%lu",
+  snprintf(buf, sizeof(buf), "phase=%s pipe=%s wifi=%d fmt=%s udp=%d rx=%lu tx=%lu",
            phaseStr(phase_), toStr(pipe_.state()), (int)WiFi.status(),
            fmt_ == TextFormat::A_DetectText ? "A" : "B",
-           udp_.active() ? 1 : 0, (unsigned long)udp_.rxCount());
+           udp_.active() ? 1 : 0, (unsigned long)udp_.rxCount(),
+           (unsigned long)udp_.txCount());
   return std::string(buf);
 }
 
