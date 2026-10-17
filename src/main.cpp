@@ -683,8 +683,10 @@ static void loopChatbotMode() {
     return;
   }
   if (M5.BtnA.wasSingleClicked()) {
-    // 手動 start/stop 切替の簡易操作 (詳細は SCPI :CHAT:*)
-    chatbotStart();
+    // 音声トグル (ToggleChatState 相当: Idle→開始 / Listening→停止 /
+    // Speaking→Abort)。未接続時は再接続にフォールバックする。
+    // 詳細は SCPI :CHAT:* (TEXT/START/STOP/ABORT/LISTEN)。
+    chatbotToggleVoice();
   }
   ::loopChatbot();
 }

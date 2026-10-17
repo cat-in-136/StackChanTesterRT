@@ -143,6 +143,8 @@ void ChatbotRuntime::openUdpAudio() {
 }
 
 void ChatbotRuntime::closeUdpAudio() {
+  voice_active_ = false;
+  mic_.end();
   player_.stop();
   closeMouth();
   if (udp_.active()) udp_.end();
@@ -355,6 +357,9 @@ void ChatbotRuntime::sendHello() {
     M5_LOGI("chatbot: hello sent");
   }
   listen_started_ = false;
+  // 新 session では旧音声は無効。RX ch も破棄 (後の Speaker 再生成のため)。
+  voice_active_ = false;
+  mic_.end();
 }
 
 void ChatbotRuntime::setupPipeCallbacks() {
@@ -384,6 +389,12 @@ void ChatbotRuntime::setupPipeCallbacks() {
   pipe_.cb.on_tts_start = [this]() {
     M5_LOGI("chatbot: tts start (uplink muted)");
     Serial.println("CHAT TTS-START");
+    // 半二重: Speaking 中は上り完全停止 (端末AECなしのため)。
+    // stop() (キュー停止) では足りない: CoreS3 は Mic/Speaker が同一
+    // I2S ポート共有で、RX ch 存命中は Speaker 側の TX 再生成が IDF に
+    // 拒否される ("register I2S object to platform failed"→無音)。
+    // そのため end() で RX ch 自体を破棄する。tts/stop で再開する。
+    mic_.end();
     // Speaking 入口でデコーダ状態リセット (公式 ResetDecoder 相当)。
     player_.reset();
     // 下り送出先の学習し直し: 無音上りを1発送る (NAT維持)。
@@ -397,6 +408,14 @@ void ChatbotRuntime::setupPipeCallbacks() {
     closeMouth();
     // 次の TEXT で listen/start から送り直すため (同一 sid 継続)。
     listen_started_ = false;
+    // 音声セッション継続中なら採取再開 (manual一発話では stop 済みのため
+    // 通常ここは通らない。保険)。失敗時は stopVoice で閉じる。
+    if (voice_active_) {
+      if (!mic_.start()) {
+        M5_LOGE("chatbot: mic resume failed -> voice stop");
+        stopVoice();
+      }
+    }
   };
   pipe_.cb.on_alert = [](const std::string& m) {
     M5_LOGI("chatbot: alert %.120s", m.c_str());
@@ -556,6 +575,9 @@ void ChatbotRuntime::setup() {
 
 void ChatbotRuntime::teardown() {
   active_ = false;
+  voice_active_ = false;
+  mic_.end();
+  venc_.end();
   transportClose();
   closeUdpAudio();
   player_.end();
@@ -665,6 +687,8 @@ void ChatbotRuntime::loop() {
     case PhReady:
       // NAT維持: 下り送出先学習を保つため無音punchを定期送信。
       punchIfStale(now);
+      // 音声上り (Listening+voice_active_ の間のみ。約16.7pkt/s)。
+      pumpVoice(now);
       break;
     case PhIdle:
       break;
@@ -734,6 +758,8 @@ void ChatbotRuntime::start() {
 }
 
 void ChatbotRuntime::stop() {
+  voice_active_ = false;
+  mic_.end();
   if (pipe_.sessionId().empty()) return;
   std::string s = buildListenStop(pipe_.sessionId());
   transportSend(s);
@@ -744,6 +770,8 @@ void ChatbotRuntime::stop() {
 }
 
 void ChatbotRuntime::abort() {
+  voice_active_ = false;
+  mic_.end();
   if (!pipe_.sessionId().empty()) {
     std::string s = buildAbort(pipe_.sessionId());
     transportSend(s);
@@ -758,6 +786,137 @@ void ChatbotRuntime::abort() {
   }
 }
 
+// 上りポンプ (PhReady 毎 loop から呼ぶ)。
+// 採取(60ms周期)→即時 encode→即時 UDP送信。encode+send は採取周期より
+// 十分速いため送信キューを持たない (公式の40pktキューは別タスク構成の
+// ためのもので、滞留した古い音声を送るより直送が会話向け)。
+void ChatbotRuntime::pumpVoice(uint32_t now) {
+  if (!voice_active_) return;
+  if (!pipe_.uplinkAllowed()) return;  // Listening の間のみ (Speaking 遮断)
+  if (!udp_.active()) return;
+  if (!venc_.ready() && !venc_.begin()) {
+    M5_LOGE("voice: encoder init failed -> voice stop");
+    Serial.println("CHAT VOICE-NG encoder");
+    stopVoice();
+    return;
+  }
+  if (!mic_.poll(voice_pcm_)) return;
+  int n = venc_.encode(voice_pcm_, voice_opus_, sizeof(voice_opus_));
+  if (n <= 0) return;
+  if (!udp_.sendAudio(voice_opus_, (size_t)n, now)) {
+    M5_LOGW("voice: udp send failed");
+    return;
+  }
+  voice_tx_count_++;
+  if (voice_tx_logged_ < 3 || (voice_tx_count_ % 100) == 0) {
+    voice_tx_logged_++;
+    M5_LOGI("voice: tx #%lu %dB", (unsigned long)voice_tx_count_, n);
+    Serial.printf("CHAT VOICE-TX #%lu %dB\r\n", (unsigned long)voice_tx_count_,
+                  n);
+  }
+}
+
+bool ChatbotRuntime::startVoice() {
+  if (phase_ != PhReady || pipe_.state() == PipelineState::Connecting) {
+    return false;
+  }
+  if (!transportConnected() || pipe_.sessionId().empty()) return false;
+  // I2S 半二重の切替順序 (CoreS3 レガシードライバはポート単一制約):
+  // 先に Speaker タスクを落とす。この時点では TX ドライバ有効のため
+  // end() は安全 (終了パスの i2s_stop が有効ドライバに当たる)。
+  // 後続の Mic 開始が TX を追い出すが、タスクは既にいないため安全。
+  // 逆順 (Mic 開始後の Speaker end) は無効ドライバへの i2s_stop で
+  // 落ちるため禁止。TTS 側は mic_.end() 済み＋タスク停止中のため
+  // begin() が新規生成する (reset/play 側では触らない)。
+  M5.Speaker.end();
+  // mic 先行: 失敗時は listen/start を送らず false (無音セッションを作らない)。
+  if (!mic_.start()) {
+    last_error_ = "mic start failed";
+    M5_LOGE("chatbot: %s", last_error_.c_str());
+    return false;
+  }
+  if (!venc_.ready() && !venc_.begin()) {
+    last_error_ = "opus encoder init failed";
+    M5_LOGE("chatbot: %s", last_error_.c_str());
+    mic_.stop();
+    return false;
+  }
+  // Touch to Talk (manual): 1タップ=一発話。stop で listen/stop を送り
+  // 明示的に区切る (auto のサーバVAD任せは一旦使わない。録音完了が
+  // 端末側で確定しないため)。
+  std::string start = buildListenStart(pipe_.sessionId(), "manual");
+  if (!transportSend(start)) {
+    mic_.stop();
+    return false;
+  }
+  listen_started_ = true;
+  voice_active_ = true;
+  pipe_.onVoiceStart(millis());
+  punchIfStale(millis(), true);
+  showText("Listening...");
+  M5_LOGI("chatbot: voice start (manual)");
+  Serial.println("CHAT LISTEN-START manual");
+  return true;
+}
+
+void ChatbotRuntime::stopVoice() {
+  voice_active_ = false;
+  mic_.end();
+  // listen/start 済みの場合のみ stop を送る (hello直後のListeningで
+  // トグル停止した場合は送らない)。
+  if (!pipe_.sessionId().empty() && listen_started_) {
+    std::string s = buildListenStop(pipe_.sessionId());
+    transportSend(s);
+  }
+  pipe_.stopSession("voice-stop", millis());
+  listen_started_ = false;
+  showText("Ready");
+  M5_LOGI("chatbot: voice stop");
+  Serial.println("CHAT LISTEN-STOP");
+}
+
+void ChatbotRuntime::abortVoice() {
+  voice_active_ = false;
+  mic_.end();
+  if (!pipe_.sessionId().empty()) {
+    std::string s = buildAbort(pipe_.sessionId());
+    transportSend(s);
+  }
+  pipe_.abort(millis());
+  player_.stop();
+  closeMouth();
+  listen_started_ = false;
+  showText("Ready");
+  M5_LOGI("chatbot: voice abort");
+  Serial.println("CHAT LISTEN-ABORT");
+}
+
+// ToggleChatState 主系のうちウェイクワードを除いた部分
+// (application.cc HandleToggleChatState 互換)。
+void ChatbotRuntime::toggleVoice() {
+  if (!active_) return;
+  PipelineState s = pipe_.state();
+  if (s == PipelineState::Listening) {
+    stopVoice();
+    return;
+  }
+  if (s == PipelineState::Speaking) {
+    abortVoice();
+    return;
+  }
+  // Idle/Connecting: 未接続なら再接続、既接続なら開始。
+  if (phase_ != PhReady || !transportConnected() ||
+      pipe_.sessionId().empty()) {
+    start();
+    return;
+  }
+  if (!startVoice()) {
+    last_error_ = "voice start failed (not ready?)";
+    M5_LOGE("chatbot: %s", last_error_.c_str());
+    Serial.printf("CHAT LISTEN-NG %s\r\n", last_error_.c_str());
+  }
+}
+
 void ChatbotRuntime::setFormatB(bool use_b) {
   fmt_ =
       use_b ? TextFormat::B_TypeText : TextFormat::A_DetectText;
@@ -769,11 +928,14 @@ bool ChatbotRuntime::getFormatB() const {
 
 std::string ChatbotRuntime::status() const {
   char buf[160];
-  snprintf(buf, sizeof(buf), "phase=%s pipe=%s wifi=%d fmt=%s udp=%d rx=%lu tx=%lu",
+  snprintf(buf, sizeof(buf),
+           "phase=%s pipe=%s wifi=%d fmt=%s udp=%d rx=%lu tx=%lu voice=%d "
+           "mic=%d vtx=%lu",
            phaseStr(phase_), toStr(pipe_.state()), (int)WiFi.status(),
            fmt_ == TextFormat::A_DetectText ? "A" : "B",
            udp_.active() ? 1 : 0, (unsigned long)udp_.rxCount(),
-           (unsigned long)udp_.txCount());
+           (unsigned long)udp_.txCount(), voice_active_ ? 1 : 0,
+           mic_.micState(), (unsigned long)voice_tx_count_);
   return std::string(buf);
 }
 

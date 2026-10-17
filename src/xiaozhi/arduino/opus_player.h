@@ -1,6 +1,6 @@
 #pragma once
 // OpusPlayer: 復号済み生Opus (60ms/mono) → PCM → M5.Speaker.playRaw。
-// デコーダは ESP8266Audio 同梱の libopus を直接使用する。
+// デコーダは sh123/esp32_opus を直接使用する。
 // AudioGeneratorOpus クラス自体は OGG コンテナ前提 (OggS demux + 48k stereo
 // 固定) のため xiaozhi UDP の生フレームには使えない。opus_* API のみ借用。
 // 再生は仮想ch固定。M5.Speaker.end() は呼ばない (pipoTask と同じく crash 回避)。
@@ -8,7 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 
-// opus 型の前方宣言 (実体・API prototype は cpp 側で AudioGeneratorOpus.h 取得)。
+// opus 型の前方宣言 (実体・API prototype は cpp 側で取得)。
 struct OpusDecoder;
 
 class OpusPlayer {
@@ -21,8 +21,6 @@ class OpusPlayer {
   ~OpusPlayer();
 
   // decoder @sampleRate/mono を用意。
-  // 注意: 同梱libopusはデコーダ専用ビルド (encoderなし) のため、
-  // 無音生成等のエンコードは行わない。
   bool begin(int sampleRate);
   void end();
   bool ready() const { return od_ != nullptr; }

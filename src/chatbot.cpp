@@ -28,6 +28,8 @@ void chatbotStop(void) { g_runtime.stop(); }
 
 void chatbotAbort(void) { g_runtime.abort(); }
 
+void chatbotToggleVoice(void) { g_runtime.toggleVoice(); }
+
 const char* chatbotStatus(void) {
   std::string s = g_runtime.status();
   snprintf(s_status_buf, sizeof(s_status_buf), "%s", s.c_str());

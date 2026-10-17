@@ -1,9 +1,8 @@
 #include "opus_player.h"
 
-// ESP8266Audio 同梱 libopus の API 宣言 (AudioGeneratorOpus.h が
-// "libopus/include/opus.h" を相対 include している経路で解決する)。
+// sh123/esp32_opus の API 宣言 (encode+decode 対応の opus 同梱)。
 // AudioGeneratorOpus クラス自体は使わない (OGG前提のため)。
-#include <AudioGeneratorOpus.h>
+#include <opus.h>
 
 #include <M5Unified.h>
 
@@ -103,4 +102,8 @@ bool OpusPlayer::isPlaying() const {
 
 void OpusPlayer::reset() {
   if (od_) opus_decoder_ctl(od_, OPUS_RESET_STATE);
+  // 注意: ここで Speaker end/begin しないこと。spk_task 終了パスは
+  // 無条件 i2s_stop のため、Mic に追い出された後の end() は落ちる。
+  // ドライバの作り直しは startVoice 側の順序 (task Kill 後の Mic 開始)
+  // で保証する。
 }

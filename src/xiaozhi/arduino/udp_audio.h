@@ -35,6 +35,10 @@ class UdpAudio {
   // header = base nonce + len/ts/seq overlay、AES-CTR 後に送信。
   bool punch(const uint8_t* payload, size_t len, uint32_t now_ms);
 
+  // 上り音声1フレーム送信 (Opus 済み payload + 採取時刻 ts)。
+  // punch と同一の header 組立・暗号・seq 進み。公式 SendAudio 相当。
+  bool sendAudio(const uint8_t* opus, size_t len, uint32_t timestamp);
+
   uint32_t rxCount() const { return rx_count_; }
   uint32_t dropCount() const { return drop_count_; }
   uint32_t txCount() const { return tx_count_; }

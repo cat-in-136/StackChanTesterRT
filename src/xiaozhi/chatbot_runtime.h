@@ -14,8 +14,10 @@
 #include "core/mqtt_session.h"
 #include "core/voice_pipeline.h"
 #include "arduino/auth_store.h"
+#include "arduino/mic_capture.h"
 #include "arduino/mqtt.h"
 #include "arduino/network.h"
+#include "arduino/opus_encoder.h"
 #include "arduino/opus_player.h"
 #include "arduino/udp_audio.h"
 
@@ -31,6 +33,10 @@ class ChatbotRuntime {
   void start();
   void stop();
   void abort();
+  // 音声トグル (ToggleChatState 相当: Idle→開始 / Listening→停止 /
+  // Speaking→Abort)。未接続時は start() (再接続) にフォールバック。
+  void toggleVoice();
+  bool voiceActive() const { return voice_active_; }
   void setFormatB(bool use_b);
   bool getFormatB() const;
   std::string status() const;
@@ -66,6 +72,15 @@ class ChatbotRuntime {
   void closeUdpAudio();
   // NAT維持用: 最終送信から10s以上なら無音フレームを1発送る。
   void punchIfStale(uint32_t now, bool force = false);
+  // 上りポンプ: Listening+voice_active_ の間のみ mic→encode→UDP送信。
+  // 半二重のため Speaking 中は呼ばない (tts_start で mic 停止済み)。
+  void pumpVoice(uint32_t now);
+  // listen/start(auto)+mic開始。false=未接続/mic失敗 (送信なし)。
+  bool startVoice();
+  // listen/stop 送信 + Idle (ToggleChatState の Listening→停止)。
+  void stopVoice();
+  // abort 送信 + 再生即時停止 + Idle (同 Speaking→Abort)。接続は維持。
+  void abortVoice();
   // Speaking中の口パク駆動 (180msトグル)。loop から呼ぶ。
   void driveMouth(uint32_t now);
   void closeMouth();
@@ -84,6 +99,8 @@ class ChatbotRuntime {
   VoicePipeline pipe_;
   UdpAudio udp_;
   OpusPlayer player_;
+  MicCapture mic_;
+  OpusVoiceEncoder venc_;
   TextFormat fmt_ = TextFormat::A_DetectText;
   ServerHelloMqtt hello_mqtt_;
 
@@ -107,6 +124,14 @@ class ChatbotRuntime {
   std::string last_emotion_;
   std::string last_error_;
   bool listen_started_ = false;
+  // 音声セッション中 (listen/start〜stop/abort)。Touch to Talk (manual)
+  // の一発話単位。stop/abort/stopVoice・切断で終了する。
+  bool voice_active_ = false;
+  uint32_t voice_tx_count_ = 0;
+  uint32_t voice_tx_logged_ = 0;
+  // 上り1フレーム作業域 (60ms PCM + Opus)。
+  int16_t voice_pcm_[MicCapture::kFrameSamples];
+  uint8_t voice_opus_[OpusVoiceEncoder::kMaxPacket];
 
   bool time_synced_ = false;
 

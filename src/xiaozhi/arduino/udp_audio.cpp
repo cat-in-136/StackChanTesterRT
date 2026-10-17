@@ -147,6 +147,11 @@ bool UdpAudio::punch(const uint8_t* payload, size_t len, uint32_t now_ms) {
   return ok;
 }
 
+bool UdpAudio::sendAudio(const uint8_t* opus, size_t len,
+                         uint32_t timestamp) {
+  return sendDatagram(opus, len, timestamp);
+}
+
 void UdpAudio::loop(const AudioCb& cb, uint32_t now_ms) {
   (void)now_ms;
   if (!active_) return;

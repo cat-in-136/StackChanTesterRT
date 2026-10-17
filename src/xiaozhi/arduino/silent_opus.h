@@ -3,9 +3,9 @@
 // 生成: anullsrc(16000Hz/mono/0.06s) → opusenc --framesize 60
 // (ffprobeで duration_time=0.060000 の60msパケットであることを確認)。
 // OGG終端のflush用3Bパケット (f8 ff fe) は含めない。
-// 同梱libopusはデコーダ専用ビルドのため現地エンコード不可、埋め込みで持つ。
-// 用途: mic-less の NAT punch / server下り送出先学習用 (空ヘッダのみでは
-// serverに捨てられ UDP-RX が来ないため)。
+// 用途: NAT punch / server下り送出先学習用 (空ヘッダのみでは server に
+// 捨てられ UDP-RX が来ないため)。音声上り自体は OpusVoiceEncoder が現地
+// エンコードするため、この埋め込みは punch 専用に残す。
 #include <cstddef>
 #include <cstdint>
 

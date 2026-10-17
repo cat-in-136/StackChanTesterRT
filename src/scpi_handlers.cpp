@@ -35,6 +35,7 @@ SCPI_Parser scpi;
  *      :START
  *      :STOP
  *      :ABORT
+ *      :LISTEN            (音声トグル: Idle→開始 / Listening→停止 / Speaking→Abort)
  *      :STAT?
  *      :FORMAT A|B
  *      :FORMAT?
@@ -218,6 +219,14 @@ void setupSCPI(void) {
         (void)commands;
         (void)parameters;
         chatbotAbort();
+        interface.print(F("OK,"));
+        interface.println(chatbotStatus());
+      });
+  scpi.RegisterCommand(
+      F(":LISTEN"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
+        (void)commands;
+        (void)parameters;
+        chatbotToggleVoice();
         interface.print(F("OK,"));
         interface.println(chatbotStatus());
       });

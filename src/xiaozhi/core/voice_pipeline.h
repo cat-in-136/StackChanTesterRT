@@ -67,6 +67,9 @@ class VoicePipeline {
     session_id_ = session_id;
     setState(PipelineState::Listening, now_ms);
   }
+  // 音声トグル開始 (listen/start 送信成功時)。hello 直後と同様 Listening
+  // に遷移させないと uplinkAllowed() が開かず上りが流れない。
+  void onVoiceStart(uint32_t now_ms) { setState(PipelineState::Listening, now_ms); }
   void onHelloFailed(uint32_t now_ms) { setState(PipelineState::Idle, now_ms); }
   void stopSession(const std::string& /*reason*/, uint32_t now_ms) {
     setState(PipelineState::Idle, now_ms);
@@ -169,6 +172,8 @@ class VoicePipeline {
         ev.kind = ServerEvent::Kind::TtsSentence;
         const char* t = doc["text"];
         if (t) ev.text = t;
+      } else if (std::strcmp(st, "sentence_end") == 0) {
+        ev.kind = ServerEvent::Kind::Ignored;  // 文境界通知 (字幕は start 側)
       }
     } else if (std::strcmp(type, "alert") == 0) {
       ev.kind = ServerEvent::Kind::Alert;
