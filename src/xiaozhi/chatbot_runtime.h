@@ -39,6 +39,8 @@ class ChatbotRuntime {
   bool voiceActive() const { return voice_active_; }
   void setFormatB(bool use_b);
   bool getFormatB() const;
+  void setVolume(uint8_t volume);
+  uint8_t getVolume() const { return volume_; }
   std::string status() const;
   std::string lastChat() const;
   bool isActive() const { return active_; }
@@ -102,6 +104,9 @@ class ChatbotRuntime {
   MicCapture mic_;
   OpusVoiceEncoder venc_;
   TextFormat fmt_ = TextFormat::A_DetectText;
+  // chatbot 音声出力 (M5.Speaker ch1) の音量 (0-255)。
+  // 128: master 128 との組み合わせで original (16×255) の約4倍。
+  uint8_t volume_ = 128;
   ServerHelloMqtt hello_mqtt_;
 
   bool active_ = false;

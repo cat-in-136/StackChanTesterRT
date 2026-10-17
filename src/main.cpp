@@ -477,9 +477,9 @@ static void *pipoTask(void *) {
   {
     M5.Mic.end();
     M5.Speaker.begin();
-    M5.Speaker.tone(2000, 100);
+    M5.Speaker.tone(2000, 100, 0);
     M5.delay(100);
-    M5.Speaker.tone(1000, 100);
+    M5.Speaker.tone(1000, 100, 0);
     M5.delay(100);
     // Do not call M5.Speaker.end() here. This cause crash..
   }
@@ -528,8 +528,8 @@ void setup() {
 
     M5.Speaker.config(spk_cfg);
   }
-  M5.Speaker.setVolume(16);
-  M5.Speaker.setChannelVolume(0, 64);
+  M5.Speaker.setVolume(128);
+  M5.Speaker.setChannelVolume(0, 16);
   M5.Speaker.begin();
   if (M5.Speaker.isEnabled()) {
     M5_LOGI("%s", "Speaker initialized");
@@ -687,6 +687,22 @@ static void loopChatbotMode() {
     // Speaking→Abort)。未接続時は再接続にフォールバックする。
     // 詳細は SCPI :CHAT:* (TEXT/START/STOP/ABORT/LISTEN)。
     chatbotToggleVoice();
+  }
+  if (M5.BtnB.wasSingleClicked()) {
+    uint8_t v = chatbotGetVolume();
+    v = (v >= 16) ? (uint8_t)(v - 16) : 0;
+    chatbotSetVolume(v);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "Vol: %u", (unsigned)v);
+    avatar.setSpeechText(buf);
+  }
+  if (M5.BtnC.wasSingleClicked()) {
+    uint8_t v = chatbotGetVolume();
+    v = (v <= 239) ? (uint8_t)(v + 16) : 255;
+    chatbotSetVolume(v);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "Vol: %u", (unsigned)v);
+    avatar.setSpeechText(buf);
   }
   ::loopChatbot();
 }

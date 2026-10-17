@@ -256,6 +256,29 @@ void setupSCPI(void) {
         (void)parameters;
         interface.println(chatbotGetFormatB() ? F("B") : F("A"));
       });
+  scpi.RegisterCommand(
+      F(":VOLUME"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
+        (void)commands;
+        const char* p0 = parameters[0];
+        if (p0 == nullptr) {
+          interface.println(F("NG,missing volume"));
+          return;
+        }
+        char* endp = nullptr;
+        long v = strtol(p0, &endp, 10);
+        if (endp == p0 || *endp != '\0' || v < 0 || v > 255) {
+          interface.println(F("NG,use 0-255"));
+          return;
+        }
+        chatbotSetVolume((uint8_t)v);
+        interface.printf("OK,%u\r\n", (unsigned)chatbotGetVolume());
+      });
+  scpi.RegisterCommand(
+      F(":VOLUME?"), [](SCPI_C commands, SCPI_P parameters, Stream &interface) {
+        (void)commands;
+        (void)parameters;
+        interface.printf("%u\r\n", (unsigned)chatbotGetVolume());
+      });
 
   scpi.SetErrorHandler(
       [](SCPI_C commands, SCPI_P parameters, Stream &interface) {

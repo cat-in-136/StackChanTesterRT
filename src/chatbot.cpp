@@ -40,6 +40,10 @@ void chatbotSetFormatB(bool use_b) { g_runtime.setFormatB(use_b); }
 
 bool chatbotGetFormatB(void) { return g_runtime.getFormatB(); }
 
+void chatbotSetVolume(uint8_t volume) { g_runtime.setVolume(volume); }
+
+uint8_t chatbotGetVolume(void) { return g_runtime.getVolume(); }
+
 const char* chatbotLastChat(void) {
   std::string s = g_runtime.lastChat();
   snprintf(s_chat_buf, sizeof(s_chat_buf), "%s", s.c_str());

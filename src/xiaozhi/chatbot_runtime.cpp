@@ -139,6 +139,8 @@ void ChatbotRuntime::openUdpAudio() {
     udp_.end();
     return;
   }
+  // 出力音量を反映 (player begin 後に設定)。
+  M5.Speaker.setChannelVolume(OpusPlayer::kChannel, volume_);
   punchIfStale(millis(), true);
 }
 
@@ -922,6 +924,16 @@ void ChatbotRuntime::setFormatB(bool use_b) {
       use_b ? TextFormat::B_TypeText : TextFormat::A_DetectText;
 }
 
+void ChatbotRuntime::setVolume(uint8_t volume) {
+  volume_ = volume;
+  // 即時反映 (再生中でも次フレームから適用)。
+  M5.Speaker.setChannelVolume(OpusPlayer::kChannel, volume_);
+  // 変更確認音 (Speaking/voice中は鳴らさない)。
+  if (!voice_active_ && pipe_.state() != PipelineState::Speaking) {
+    M5.Speaker.tone(1000, 80, OpusPlayer::kChannel);
+  }
+}
+
 bool ChatbotRuntime::getFormatB() const {
   return fmt_ == TextFormat::B_TypeText;
 }
@@ -929,13 +941,13 @@ bool ChatbotRuntime::getFormatB() const {
 std::string ChatbotRuntime::status() const {
   char buf[160];
   snprintf(buf, sizeof(buf),
-           "phase=%s pipe=%s wifi=%d fmt=%s udp=%d rx=%lu tx=%lu voice=%d "
-           "mic=%d vtx=%lu",
-           phaseStr(phase_), toStr(pipe_.state()), (int)WiFi.status(),
-           fmt_ == TextFormat::A_DetectText ? "A" : "B",
-           udp_.active() ? 1 : 0, (unsigned long)udp_.rxCount(),
-           (unsigned long)udp_.txCount(), voice_active_ ? 1 : 0,
-           mic_.micState(), (unsigned long)voice_tx_count_);
+            "phase=%s pipe=%s wifi=%d fmt=%s udp=%d rx=%lu tx=%lu voice=%d "
+            "mic=%d vtx=%lu vol=%u",
+            phaseStr(phase_), toStr(pipe_.state()), (int)WiFi.status(),
+            fmt_ == TextFormat::A_DetectText ? "A" : "B",
+            udp_.active() ? 1 : 0, (unsigned long)udp_.rxCount(),
+            (unsigned long)udp_.txCount(), voice_active_ ? 1 : 0,
+            mic_.micState(), (unsigned long)voice_tx_count_, volume_);
   return std::string(buf);
 }
 
