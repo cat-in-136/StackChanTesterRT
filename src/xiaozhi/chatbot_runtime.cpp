@@ -403,8 +403,8 @@ void ChatbotRuntime::setupPipeCallbacks() {
     punchIfStale(millis(), true);
   };
   pipe_.cb.on_tts_stop = [this]() {
-    M5_LOGI("chatbot: tts stop");
-    Serial.println("CHAT TTS-STOP");
+    M5_LOGI("chatbot: tts stop (dropped=%u)", (unsigned)player_.dropCount());
+    Serial.printf("CHAT TTS-STOP dropped=%u\\r\\n", (unsigned)player_.dropCount());
     // 再生キュー破棄 (即時停止) + 口を閉じる。
     player_.stop();
     closeMouth();

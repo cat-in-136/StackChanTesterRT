@@ -16,29 +16,60 @@ class OpusPlayer {
   static constexpr int kChannel = 1;
   // 下り最大: 24000Hz * 60ms = 1440 samples/mono。
   static constexpr int kMaxFrameSamples = 1440;
+  // M5Unified playRaw はポインタ保持 (コピーなし) のため、キューに乗っている
+  // 間は当該 PCM バッファを上書きできない。内部キューは最大2個なので、
+  // 4面のラウンドロビン(成功時のみ進む)で必ず空きができる (doc note #29)。
+  static constexpr uint8_t kBufferCount = 4;
+  // ネットワーク受信と復号/再生を切り離すためのパケットキュー。
+  static constexpr size_t kPacketMax = 1500;
+  static constexpr int kQueueDepth = 6;
+
+  struct OpusPacket {
+    uint8_t data[kPacketMax];
+    size_t len;  // 0 = PLC (concealment) センチネル
+  };
 
   OpusPlayer();
   ~OpusPlayer();
 
-  // decoder @sampleRate/mono を用意。
+  // decoder @sampleRate/mono を用意。パケットキューと再生タスクも起動。
   bool begin(int sampleRate);
   void end();
   bool ready() const { return od_ != nullptr; }
   int sampleRate() const { return sample_rate_; }
 
-  // 1フレーム復号→再生。false=decode失敗 (欠落扱いで次へ)。
+  // 1フレームをキューへ投入 (非ブロッキング)。false=キュー満杯/未初期化。
   bool play(const uint8_t* opus, size_t len);
-  // 欠落時のPLC (時刻維持用。失敗しても無害)。
+  // 欠落時のPLC (キューへセンチネル投入)。
   void playConcealment();
   void stop();
   bool isPlaying() const;
   // Speaking 入口で呼ぶ (デコーダ状態リセット)。
   void reset();
 
+  uint32_t dropCount() const { return drop_count_; }
+
  private:
   OpusDecoder* od_ = nullptr;
   int sample_rate_ = 24000;
-  int16_t pcm_[kMaxFrameSamples];
+  // 4面の PCM プール。
+  int16_t pcm_pool_[kBufferCount][kMaxFrameSamples];
+  // 次に書き込むバッファ index (enqueue 成功時のみ進む)。
+  uint8_t write_idx_ = 0;
+
+  // パケットキューと再生タスク。
+  void* pkt_queue_ = nullptr;   // QueueHandle_t
+  void* task_handle_ = nullptr; // TaskHandle_t
+  volatile bool task_running_ = false;
+
   uint32_t play_fail_logged_ = 0;
   uint32_t diag_logged_ = 0;
+  uint32_t drop_count_ = 0;
+
+  // バックプレッシャ付きで pcm_pool_[idx] を再生キューへ乗せる。
+  // false=キュー満杯による drop / playRaw 失敗。
+  bool enqueue(int idx, int samples);
+
+  static void taskThunk(void* arg);
+  void taskLoop();
 };

@@ -39,6 +39,8 @@ SCPI_Parser scpi;
  *      :STAT?
  *      :FORMAT A|B
  *      :FORMAT?
+ *      :VOLUME [0-255]      (Pipo/Chat 音量。省略可)
+ *      :VOLUME?             (現在値参照)
  */
 void setupSCPI(void) {
   scpi.SetCommandTreeBase(F("SYSTem"));

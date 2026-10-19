@@ -6,10 +6,18 @@
 
 #include <M5Unified.h>
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
+
 #include <cstdlib>
 #include <cstring>
 
-OpusPlayer::OpusPlayer() { memset(pcm_, 0, sizeof(pcm_)); }
+OpusPlayer::OpusPlayer() {
+  for (int i = 0; i < kBufferCount; i++) {
+    memset(pcm_pool_[i], 0, sizeof(pcm_pool_[i]));
+  }
+}
 
 OpusPlayer::~OpusPlayer() { end(); }
 
@@ -28,72 +36,124 @@ bool OpusPlayer::begin(int sampleRate) {
     od_ = nullptr;
     return false;
   }
+
+  // パケットキュー作成。
+  pkt_queue_ = xQueueCreate(kQueueDepth, sizeof(OpusPacket));
+  if (!pkt_queue_) {
+    free(od_);
+    od_ = nullptr;
+    return false;
+  }
+
+  // プール状態リセット。
+  write_idx_ = 0;
+  drop_count_ = 0;
   play_fail_logged_ = 0;
   diag_logged_ = 0;
-  M5_LOGI("opus: decoder sr=%d mono", sample_rate_);
+
+  // 再生タスク起動 (Core 0, M5Unified spk_task は Core 1)。
+  task_running_ = true;
+  BaseType_t ok = xTaskCreatePinnedToCore(
+      &OpusPlayer::taskThunk, "opusPlay", 16384, this, 3, (TaskHandle_t*)&task_handle_, 0);
+  if (ok != pdPASS) {
+    task_running_ = false;
+    vQueueDelete((QueueHandle_t)pkt_queue_);
+    pkt_queue_ = nullptr;
+    free(od_);
+    od_ = nullptr;
+    return false;
+  }
+
+  M5_LOGI("opus: decoder sr=%d mono (bufs=%d, q=%d)", sample_rate_,
+          kBufferCount, kQueueDepth);
   return true;
 }
 
 void OpusPlayer::end() {
   stop();
+  if (task_handle_) {
+    task_running_ = false;
+    // タスクが blocking receive なら queue へ sentinel を送って起こす。
+    if (pkt_queue_) {
+      OpusPacket pkt;
+      memset(&pkt, 0, sizeof(pkt));
+      pkt.len = 0;
+      xQueueSend((QueueHandle_t)pkt_queue_, &pkt, 0);
+    }
+    // 終了を少し待つ (バックプレッシャ最大100ms + 余裕)。
+    for (int i = 0; i < 120 && task_handle_; i++) {
+      vTaskDelay(1);
+    }
+    if (task_handle_) {
+      vTaskDelete((TaskHandle_t)task_handle_);
+      task_handle_ = nullptr;
+    }
+  }
+  if (pkt_queue_) {
+    vQueueDelete((QueueHandle_t)pkt_queue_);
+    pkt_queue_ = nullptr;
+  }
   if (od_) {
     free(od_);
     od_ = nullptr;
   }
 }
 
-bool OpusPlayer::play(const uint8_t* opus, size_t len) {
-  if (!od_ || !opus || len == 0 || len > 1500) return false;
-  // 監視用: セッション先頭3フレームは decode 前後のスタック残量を出す。
-  // opus_decode 1発で約4KB消費するため、loopTask 8KB既定では overflow で
-  // 落ちる (Backtrace破損→再起動を確認済み)。platformio.ini で loopTask を
-  // 32KB に拡大して対処。残量の後退があればここで検知できる。
-  bool diag = diag_logged_ < 3;
-  if (diag) diag_logged_++;
-  if (diag) {
-    M5_LOGD("opus: pre-decode len=%u hwm=%u", (unsigned)len,
-            (unsigned)uxTaskGetStackHighWaterMark(nullptr));
+bool OpusPlayer::enqueue(int idx, int samples) {
+  // バックプレッシャ: isPlaying は 0/1/2 (キュー占有率、満杯=2) を返す。
+  uint32_t t0 = millis();
+  while (task_running_ && M5.Speaker.isPlaying(kChannel) >= 2 &&
+         (millis() - t0) < 100u) {
+    vTaskDelay(1);
   }
-  int samples =
-      opus_decode(od_, opus, (opus_int32)len, pcm_, kMaxFrameSamples, 0);
-  if (samples <= 0) {
-    if (play_fail_logged_ < 5) {
-      play_fail_logged_++;
-      M5_LOGW("opus: decode err=%d len=%u", samples, (unsigned)len);
+  if (M5.Speaker.isPlaying(kChannel) >= 2) {
+    drop_count_++;
+    if (drop_count_ <= 10) {
+      M5_LOGW("opus: queue full, frame dropped (total=%u)",
+              (unsigned)drop_count_);
     }
     return false;
   }
-  if (!M5.Speaker.isEnabled()) {
-    M5.Speaker.begin();
-  }
-  if (diag) {
-    M5_LOGD("opus: decoded samples=%d hwm=%u", samples,
-            (unsigned)uxTaskGetStackHighWaterMark(nullptr));
-  }
-  // mono のまま再生 (stereo アップミックス不要)。
-  bool ok = M5.Speaker.playRaw(pcm_, (size_t)samples,
+  bool ok = M5.Speaker.playRaw(pcm_pool_[idx], (size_t)samples,
                                (uint32_t)sample_rate_, false, 1, kChannel);
   if (!ok && play_fail_logged_ < 10) {
     play_fail_logged_++;
-    M5_LOGW("opus: playRaw busy, frame dropped");
+    M5_LOGW("opus: playRaw failed");
   }
   return ok;
 }
 
-void OpusPlayer::playConcealment() {
-  if (!od_) return;
-  int samples = opus_decode(od_, nullptr, 0, pcm_, kMaxFrameSamples, 0);
-  if (samples <= 0) return;
-  if (!M5.Speaker.isEnabled()) {
-    M5.Speaker.begin();
+bool OpusPlayer::play(const uint8_t* opus, size_t len) {
+  if (!od_ || !opus || len == 0 || len > kPacketMax) return false;
+  if (!pkt_queue_) return false;
+
+  OpusPacket pkt;
+  memcpy(pkt.data, opus, len);
+  pkt.len = len;
+
+  if (xQueueSend((QueueHandle_t)pkt_queue_, &pkt, 0) != pdPASS) {
+    drop_count_++;
+    if (drop_count_ <= 10) {
+      M5_LOGW("opus: packet queue full, frame dropped (total=%u)",
+              (unsigned)drop_count_);
+    }
+    return false;
   }
-  M5.Speaker.playRaw(pcm_, (size_t)samples, (uint32_t)sample_rate_, false,
-                     1, kChannel);
+  return true;
+}
+
+void OpusPlayer::playConcealment() {
+  if (!od_ || !pkt_queue_) return;
+  OpusPacket pkt;
+  memset(&pkt, 0, sizeof(pkt));
+  pkt.len = 0;  // センチネル → task で PLC 実行
+  xQueueSend((QueueHandle_t)pkt_queue_, &pkt, 0);
 }
 
 void OpusPlayer::stop() {
-  // 終了時はキュー破棄 (ABORT/STOP/tts-stop の即時停止用)。
+  if (pkt_queue_) xQueueReset((QueueHandle_t)pkt_queue_);
   M5.Speaker.stop(kChannel);
+  write_idx_ = 0;
 }
 
 bool OpusPlayer::isPlaying() const {
@@ -102,8 +162,56 @@ bool OpusPlayer::isPlaying() const {
 
 void OpusPlayer::reset() {
   if (od_) opus_decoder_ctl(od_, OPUS_RESET_STATE);
-  // 注意: ここで Speaker end/begin しないこと。spk_task 終了パスは
-  // 無条件 i2s_stop のため、Mic に追い出された後の end() は落ちる。
-  // ドライバの作り直しは startVoice 側の順序 (task Kill 後の Mic 開始)
-  // で保証する。
+  if (pkt_queue_) xQueueReset((QueueHandle_t)pkt_queue_);
+  write_idx_ = 0;
+}
+
+void OpusPlayer::taskThunk(void* arg) {
+  static_cast<OpusPlayer*>(arg)->taskLoop();
+}
+
+void OpusPlayer::taskLoop() {
+  OpusPacket pkt;
+  while (task_running_) {
+    if (xQueueReceive((QueueHandle_t)pkt_queue_, &pkt, portMAX_DELAY) != pdPASS) {
+      continue;
+    }
+    if (!task_running_) break;
+
+    int idx = write_idx_;
+    int samples;
+    if (pkt.len == 0) {
+      // PLC (concealment)
+      samples = opus_decode(od_, nullptr, 0, pcm_pool_[idx], kMaxFrameSamples, 0);
+    } else {
+      bool diag = diag_logged_ < 3;
+      if (diag) diag_logged_++;
+      if (diag) {
+        M5_LOGD("opus: pre-decode len=%u", (unsigned)pkt.len);
+      }
+      samples = opus_decode(od_, pkt.data, (opus_int32)pkt.len, pcm_pool_[idx],
+                            kMaxFrameSamples, 0);
+      if (samples <= 0) {
+        if (play_fail_logged_ < 5) {
+          play_fail_logged_++;
+          M5_LOGW("opus: decode err=%d len=%u", samples, (unsigned)pkt.len);
+        }
+        continue;
+      }
+      if (diag) {
+        M5_LOGD("opus: decoded samples=%d (buf=%d)", samples, idx);
+      }
+    }
+    if (samples <= 0) continue;
+
+    if (!M5.Speaker.isEnabled()) {
+      M5.Speaker.begin();
+    }
+
+    if (enqueue(idx, samples)) {
+      write_idx_ = (write_idx_ + 1) % kBufferCount;
+    }
+  }
+  task_handle_ = nullptr;
+  vTaskDelete(nullptr);
 }
