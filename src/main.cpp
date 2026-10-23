@@ -1,3 +1,6 @@
+#include <SPI.h>
+#include <SD.h>
+
 #include <Avatar.h>
 #include <M5Unified.h>
 #include <lvgl.h>
@@ -15,6 +18,15 @@ static HardwareSerial &DXL_SERIAL = Serial1;
 
 #define TFT_HOR_RES 320
 #define TFT_VER_RES 240
+
+// CoreS3 microSD (SPI)
+#define SD_SPI_CS_PIN 4
+#define SD_SPI_SCK_PIN 36
+#define SD_SPI_MISO_PIN 35
+#define SD_SPI_MOSI_PIN 37
+
+#define LVGL_TTF_FONT_PATH "S:/font.ttf"
+#define LVGL_TTF_FONT_SIZE 14
 
 enum OperationMode {
   Idle = 0,
@@ -42,6 +54,39 @@ static lv_obj_t *adjust_y_value_label = nullptr;
 
 static uint32_t
     draw_buf[TFT_HOR_RES * TFT_VER_RES / 10 * (LV_COLOR_DEPTH / 8) / 4];
+
+/* Font rendered by LVGL Tiny TTF from the microSD card. */
+static lv_font_t *sd_font = nullptr;
+
+static bool initSdCard() {
+  SPI.begin(SD_SPI_SCK_PIN, SD_SPI_MISO_PIN, SD_SPI_MOSI_PIN, SD_SPI_CS_PIN);
+  if (!SD.begin(SD_SPI_CS_PIN, SPI, 25000000)) {
+    M5_LOGE("%s", "SD card not detected");
+    return false;
+  }
+  M5_LOGI("%s", "SD card detected");
+  return true;
+}
+
+static void loadSdFont() {
+  if (!SD.exists("/font.ttf")) {
+    M5_LOGW("%s", "/font.ttf not found on SD card; using built-in font");
+    return;
+  }
+  sd_font = lv_tiny_ttf_create_file(LVGL_TTF_FONT_PATH, LVGL_TTF_FONT_SIZE);
+  if (sd_font == nullptr) {
+    M5_LOGE("%s", "Failed to load /font.ttf; using built-in font");
+  } else {
+    M5_LOGI("%s", "Loaded /font.ttf from SD card");
+  }
+}
+
+/* Text font is inherited by the screen's children. */
+static void applyScreenFont(lv_obj_t *screen) {
+  if (sd_font != nullptr) {
+    lv_obj_set_style_text_font(screen, sd_font, 0);
+  }
+}
 
 static void my_disp_flush(lv_display_t *disp, const lv_area_t *area,
                           uint8_t *px_map) {
@@ -129,6 +174,7 @@ static void create_menu_screen() {
     lv_obj_delete(menu_screen);
   }
   menu_screen = lv_obj_create(NULL);
+  applyScreenFont(menu_screen);
 
   lv_obj_t *title = lv_label_create(menu_screen);
   lv_label_set_text(title, "StackChanTesterRT Menu");
@@ -214,6 +260,7 @@ static void create_adjust_screen() {
     lv_obj_delete(adjust_screen);
   }
   adjust_screen = lv_obj_create(NULL);
+  applyScreenFont(adjust_screen);
 
   lv_obj_t *title = lv_label_create(adjust_screen);
   lv_label_set_text(title, "Adjust");
@@ -269,6 +316,7 @@ static void create_position_screen() {
     lv_obj_delete(position_screen);
   }
   position_screen = lv_obj_create(NULL);
+  applyScreenFont(position_screen);
 
   lv_obj_t *title = lv_label_create(position_screen);
   lv_label_set_text(title, "Position");
@@ -496,6 +544,8 @@ void setup() {
   M5.begin(cfg);
   Serial.begin(115200);
 
+  initSdCard();
+
   M5.Log.setLogLevel(m5::log_target_display, ESP_LOG_INFO);
   // XXX Do not set log level for m5::log_target_serial! this break
   // Serial.read()!
@@ -559,6 +609,7 @@ void setup() {
   /* LVGL v9 (mode-selection menu screen) */
   lv_init();
   lv_tick_set_cb(my_tick);
+  loadSdFont();
 #if LV_USE_LOG != 0
   lv_log_register_print_cb([](lv_log_level_t level, const char *buf) {
     LV_UNUSED(level);
