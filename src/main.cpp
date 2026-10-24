@@ -433,6 +433,7 @@ static void changeOperationMode(OperationMode new_mode) {
     M5.setTouchButtonHeightByRatio(TOUCH_BUTTON_RATIO);
     lv_screen_load(avatar.screen());
     applyScreenFont(avatar.screen());
+    avatar.setBatteryStatus(M5.Power.isCharging(), M5.Power.getBatteryLevel());
   }
 
   op_mode = new_mode;
@@ -666,6 +667,7 @@ static void loopRandom() {
   } else if (M5.BtnA.wasReleasedAfterHold() || M5.BtnPWR.wasClicked()) {
     changeOperationMode(OperationMode::Menu);
     avatar.setBatteryIcon(true);
+    avatar.setBatteryStatus(M5.Power.isCharging(), M5.Power.getBatteryLevel());
     return;
   }
 

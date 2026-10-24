@@ -50,6 +50,8 @@ private:
   void applyBreath();
   void updateSaccade(uint32_t now);
   void updateBattery();
+  void drawBattery(lv_layer_t *layer, lv_coord_t x, lv_coord_t y) const;
+  static void batteryDrawCb(lv_event_t *e);
   void applyEyeWeights(int left_weight, int right_weight);
   void stopBlinkAndRestore();
 
@@ -60,7 +62,7 @@ private:
   std::unique_ptr<DefaultMouth> _mouth;
   std::unique_ptr<DefaultEffect> _effect;
   std::unique_ptr<DefaultSpeechBubble> _speech_bubble;
-  lv_obj_t *_battery_label = nullptr;
+  lv_obj_t *_battery_obj = nullptr;
   lv_timer_t *_timer = nullptr;
 
   AvatarTheme::ColorPalette _palette;

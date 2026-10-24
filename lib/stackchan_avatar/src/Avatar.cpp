@@ -33,7 +33,7 @@ Avatar::~Avatar() {
     lv_obj_delete(_screen);
     _screen = nullptr;
     _panel = nullptr;
-    _battery_label = nullptr;
+    _battery_obj = nullptr;
   }
 }
 
@@ -64,10 +64,16 @@ void Avatar::begin() {
   _speech_bubble.reset(new DefaultSpeechBubble(
       _panel, _palette.balloon_bg, _palette.balloon_text));
 
-  _battery_label = lv_label_create(_panel);
-  lv_obj_set_style_text_color(_battery_label, _palette.battery, 0);
-  lv_obj_align(_battery_label, LV_ALIGN_TOP_RIGHT, -8, 6);
-  lv_obj_add_flag(_battery_label, LV_OBJ_FLAG_HIDDEN);
+  // Battery icon: the whole icon is custom-drawn in one object, ported from
+  // m5stack-avatar's BatteryIcon (drawRect/fillRect/fillTriangle/drawLine).
+  _battery_obj = lv_obj_create(_panel);
+  lv_obj_remove_style_all(_battery_obj);
+  lv_obj_clear_flag(_battery_obj, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_clear_flag(_battery_obj, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_size(_battery_obj, 35, 15);
+  lv_obj_align(_battery_obj, LV_ALIGN_TOP_RIGHT, -10, 10);
+  lv_obj_add_event_cb(_battery_obj, batteryDrawCb, LV_EVENT_DRAW_MAIN, this);
+  lv_obj_add_flag(_battery_obj, LV_OBJ_FLAG_HIDDEN);
 
   _expression = Expression::Neutral;
   _left_eye->setEmotion(_expression);
@@ -214,14 +220,14 @@ void Avatar::setBatteryIcon(bool enabled) {
     return;
   }
   _battery_icon = enabled;
-  if (_battery_label == nullptr) {
+  if (_battery_obj == nullptr) {
     return;
   }
   if (enabled) {
-    lv_obj_clear_flag(_battery_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_clear_flag(_battery_obj, LV_OBJ_FLAG_HIDDEN);
     updateBattery();
   } else {
-    lv_obj_add_flag(_battery_label, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_add_flag(_battery_obj, LV_OBJ_FLAG_HIDDEN);
   }
 }
 
@@ -237,7 +243,7 @@ void Avatar::setBatteryStatus(bool is_charging, int level) {
   }
   _is_charging = is_charging;
   _battery_level = level;
-  if (_battery_icon && _battery_label != nullptr) {
+  if (_battery_icon && _battery_obj != nullptr) {
     updateBattery();
   }
 }
@@ -354,17 +360,108 @@ void Avatar::applyPalette() {
     _effect->setColors(_palette.eye, _palette.bg);
     _speech_bubble->setColors(_palette.balloon_bg, _palette.balloon_text);
   }
-  if (_battery_label != nullptr) {
-    lv_obj_set_style_text_color(_battery_label, _palette.battery, 0);
+  if (_battery_obj != nullptr) {
+    lv_obj_invalidate(_battery_obj);
   }
 }
 
 void Avatar::updateBattery() {
-  if (_battery_label == nullptr) {
+  if (_battery_obj != nullptr) {
+    lv_obj_invalidate(_battery_obj);
+  }
+}
+
+void Avatar::drawBattery(lv_layer_t *layer, lv_coord_t x, lv_coord_t y) const {
+  const lv_color_t fg = _palette.battery;
+  const lv_color_t bg = _palette.bg;
+
+  lv_draw_rect_dsc_t dsc;
+  lv_draw_rect_dsc_init(&dsc);
+  dsc.radius = 0;
+  dsc.bg_opa = LV_OPA_TRANSP;
+  dsc.border_opa = LV_OPA_COVER;
+  dsc.border_color = fg;
+  dsc.border_width = 1;
+
+  lv_area_t area;
+
+  // Terminal nub: drawRect(x, y + 5, 5, 5)
+  area.x1 = x;
+  area.y1 = y + 5;
+  area.x2 = x + 4;
+  area.y2 = y + 9;
+  lv_draw_rect(layer, &dsc, &area);
+
+  // Body outline: drawRect(x + 5, y, 30, 15)
+  area.x1 = x + 5;
+  area.y1 = y;
+  area.x2 = x + 34;
+  area.y2 = y + 14;
+  lv_draw_rect(layer, &dsc, &area);
+
+  // Fill: fillRect(x + 5 + 30 - battery_width, y, battery_width, 15)
+  int battery_width = (int)(30.0f * ((float)_battery_level / 100.0f));
+  if (battery_width > 0) {
+    lv_draw_rect_dsc_t fill;
+    lv_draw_rect_dsc_init(&fill);
+    fill.radius = 0;
+    fill.bg_opa = LV_OPA_COVER;
+    fill.bg_color = fg;
+    fill.border_width = 0;
+    area.x1 = x + 5 + 30 - battery_width;
+    area.y1 = y;
+    area.x2 = x + 34;
+    area.y2 = y + 14;
+    lv_draw_rect(layer, &fill, &area);
+  }
+
+  if (_is_charging) {
+    // Carve the bolt out of the fill with the background color.
+    lv_draw_triangle_dsc_t tri;
+    lv_draw_triangle_dsc_init(&tri);
+    tri.color = bg;
+    tri.opa = LV_OPA_COVER;
+
+    tri.p[0] = {x + 20, y};
+    tri.p[1] = {x + 15, y + 8};
+    tri.p[2] = {x + 20, y + 8};
+    lv_draw_triangle(layer, &tri);
+
+    tri.p[0] = {x + 18, y + 7};
+    tri.p[1] = {x + 18, y + 15};
+    tri.p[2] = {x + 23, y + 7};
+    lv_draw_triangle(layer, &tri);
+
+    // Outline the bolt edges with the foreground color.
+    lv_draw_line_dsc_t line;
+    lv_draw_line_dsc_init(&line);
+    line.color = fg;
+    line.width = 1;
+    line.opa = LV_OPA_COVER;
+
+    line.p1 = {x + 20, y};
+    line.p2 = {x + 15, y + 8};
+    lv_draw_line(layer, &line);
+    line.p1 = {x + 20, y};
+    line.p2 = {x + 20, y + 7};
+    lv_draw_line(layer, &line);
+    line.p1 = {x + 18, y + 15};
+    line.p2 = {x + 23, y + 7};
+    lv_draw_line(layer, &line);
+    line.p1 = {x + 18, y + 8};
+    line.p2 = {x + 18, y + 15};
+    lv_draw_line(layer, &line);
+  }
+}
+
+void Avatar::batteryDrawCb(lv_event_t *e) {
+  Avatar *self = (Avatar *)lv_event_get_user_data(e);
+  lv_obj_t *obj = (lv_obj_t *)lv_event_get_target(e);
+  if (self == nullptr || obj == nullptr) {
     return;
   }
-  char buf[16];
-  snprintf(buf, sizeof(buf), "%s%d%%", _is_charging ? "+" : "",
-           _battery_level);
-  lv_label_set_text(_battery_label, buf);
+  lv_layer_t *layer = lv_event_get_layer(e);
+  lv_area_t coords;
+  lv_obj_get_coords(obj, &coords);
+  self->drawBattery(layer, coords.x1, coords.y1);
 }
