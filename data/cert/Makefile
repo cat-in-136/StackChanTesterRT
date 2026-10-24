@@ -10,6 +10,10 @@ cacert.pem:
 		curl --remote-name https://curl.se/ca/cacert.pem ;\
 	fi
 
-x509_crt_bundle: cacert.pem gen_crt_bundle.py
-	python gen_crt_bundle.py -i cacert.pem
+DigiCertGlobalRootCA.pem:
+	curl -sSfL -o $@ https://cacerts.digicert.com/DigiCertGlobalRootCA.crt.pem
+
+x509_crt_bundle: cacert.pem DigiCertGlobalRootCA.pem gen_crt_bundle.py
+	python gen_crt_bundle.py -i cacert.pem DigiCertGlobalRootCA.pem
+
 
