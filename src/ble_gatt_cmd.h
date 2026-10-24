@@ -2,7 +2,7 @@
 
 #include <Avatar.h>
 
-extern m5avatar::Avatar avatar;
+extern Avatar avatar;
 
 void setupBLE(void);
 void teardownBLE(void);

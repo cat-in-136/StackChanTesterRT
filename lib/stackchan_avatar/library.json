@@ -1,0 +1,12 @@
+{
+  "name": "stackchan_avatar",
+  "version": "0.1.0",
+  "description": "LVGL based avatar for StackChan RT (replaces meganetaaan/M5Stack-Avatar)",
+  "license": "MIT",
+  "dependencies": [
+    {
+      "name": "lvgl/lvgl",
+      "version": "^9.5.0"
+    }
+  ]
+}

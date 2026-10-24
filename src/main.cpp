@@ -41,7 +41,7 @@ enum OperationMode {
 };
 
 OperationMode op_mode = OperationMode::Idle;
-m5avatar::Avatar avatar;
+Avatar avatar;
 ServoController servo_controller(DXL_SERIAL);
 
 /* LVGL v9 menu screen */
@@ -115,43 +115,8 @@ static void my_touchpad_read(lv_indev_t *indev, lv_indev_data_t *data) {
 
 static uint32_t my_tick(void) { return millis(); }
 
-/* The Avatar library redraws the screen from its own background task
- * (drawLoop). It can NEVER run concurrently with LVGL on the shared display
- * bus. Instead of suspend/resume (vTaskSuspend can freeze the task in the
- * middle of an SPI transaction), we fully stop the task and wait for it to
- * exit before LVGL is allowed to flush, and (re)start it only while LVGL is
- * dormant. */
-static bool avatar_task_active = false;
-
-static void avatarTaskStopAndWait() {
-  if (!avatar_task_active) {
-    return;
-  }
-  avatar.stop();
-  vTaskDelay(80 /
-             portTICK_PERIOD_MS); // let drawLoop finish current frame & exit
-  M5.Display.waitDisplay();
-  avatar_task_active = false;
-}
-
-static void avatarTaskStart() {
-  if (avatar_task_active) {
-    return;
-  }
-  M5.Display.waitDisplay();
-  avatar.start();
-  // Reset the expression when (re)starting the Avatar task. This is the only
-  // safe place for it: Avatar::setExpression() -> suspend() ->
-  // vTaskSuspend(drawTaskHandle) treats a NULL handle as "suspend the current
-  // task", so it must never run while the Avatar task is stopped/never started.
-  avatar.setExpression(m5avatar::Expression::Neutral);
-  avatar_task_active = true;
-}
-
-/* Mode transition support. The screen ownership switches between the Avatar
- * task (LGFX direct draw) and LVGL: they can never run concurrently on the
- * shared display bus. All mode changes go through changeOperationMode() so the
- * crossing into/out of an LVGL mode is handled in one place. */
+/* Mode transition support. All screens (avatar and UI) are LVGL screens, so
+ * mode change only swaps the loaded screen via lv_screen_load(). */
 static void menu_item_cb(lv_event_t *e);
 
 static lv_obj_t *add_menu_button(lv_obj_t *parent, const char *text,
@@ -288,9 +253,10 @@ static void adjust_back_cb(lv_event_t *e) {
   }
 }
 
-/* A mode is an "LVGL mode" if its screen is rendered by LVGL instead of the
- * Avatar task. Add new LVGL screens here. */
-static bool isLVGLMode(OperationMode mode) {
+/* A mode shows either a dedicated LVGL UI screen (Menu/Position/Adjust) or
+ * the Avatar screen. Both are plain LVGL screens: mode change is a
+ * lv_screen_load() plus touch-button (virtual A/B/C) ownership switch. */
+static bool isUiScreenMode(OperationMode mode) {
   switch (mode) {
   case OperationMode::Menu:
   case OperationMode::Position:
@@ -444,9 +410,6 @@ static void changeOperationMode(OperationMode new_mode) {
   }
   M5_LOGD("changeOperationMode: %d -> %d", op_mode, new_mode);
 
-  bool lvgl_mode = isLVGLMode(op_mode);
-  bool new_lvgl_mode = isLVGLMode(new_mode);
-
   if (op_mode == OperationMode::BleRemote) {
     teardownBLE();
   }
@@ -457,28 +420,19 @@ static void changeOperationMode(OperationMode new_mode) {
     teardownChatbot();
   }
   if (new_mode == OperationMode::Chatbot) {
-    // chatbot 側は expression を変えない (scaffold) ため、
-    // Avatar タスクとの競合はなく、他モードと同様に前段で呼べる。
     setupChatbot();
   }
 
-  if (lvgl_mode != new_lvgl_mode) {
-    if (new_lvgl_mode) {
-      M5.setTouchButtonHeight(0);
-      avatarTaskStopAndWait();
-      M5.Log.setLogLevel(m5::log_target_display, ESP_LOG_INFO);
-    } else {
-      M5.setTouchButtonHeightByRatio(TOUCH_BUTTON_RATIO);
-      // Avatar 稼働中は画面ログを止める。M5.Log の display ターゲットは
-      // 呼び出し元タスクから直接 SPI を叩くため drawLoop と競合し、
-      // spiEndTransaction の mutex assert で落ちる (Chatbot で発症済み)。
-      // シリアルログは継続する。
-      M5.Log.setLogLevel(m5::log_target_display, ESP_LOG_NONE);
-      avatarTaskStart();
-    }
-  }
-  if (new_lvgl_mode) {
+  bool new_ui_mode = isUiScreenMode(new_mode);
+  if (new_ui_mode) {
+    // LVGL UI screen: virtual A/B/C touch buttons must not swallow menu taps.
+    M5.setTouchButtonHeight(0);
     loadLVGLScreen(new_mode);
+  } else {
+    // Avatar screen: full-screen virtual touch buttons + speech balloon.
+    M5.setTouchButtonHeightByRatio(TOUCH_BUTTON_RATIO);
+    lv_screen_load(avatar.screen());
+    applyScreenFont(avatar.screen());
   }
 
   op_mode = new_mode;
@@ -546,7 +500,6 @@ void setup() {
 
   initSdCard();
 
-  M5.Log.setLogLevel(m5::log_target_display, ESP_LOG_INFO);
   // XXX Do not set log level for m5::log_target_serial! this break
   // Serial.read()!
   // M5.Log.setLogLevel(m5::log_target_serial, ESP_LOG_INFO);
@@ -600,13 +553,7 @@ void setup() {
   delay(1000);
   servo_controller.begin();
 
-  // NOTE: do NOT call avatar.init()/start() here. The Avatar task must stay
-  // stopped while the LVGL menu owns the screen at boot.
-
-  avatar.setBatteryIcon(true);
-  avatar.setBatteryStatus(M5.Power.isCharging(), M5.Power.getBatteryLevel());
-
-  /* LVGL v9 (mode-selection menu screen) */
+  /* LVGL v9 (initialize) */
   lv_init();
   lv_tick_set_cb(my_tick);
   loadSdFont();
@@ -617,6 +564,12 @@ void setup() {
     Serial.flush();
   });
 #endif
+  // Display log is always OFF: M5.Log's display target pokes SPI directly
+  // from the caller task and races the LVGL flush (spiEndTransaction assert
+  // crash, seen in Chatbot). Logs go to Serial only.
+  M5.Log.setLogLevel(m5::log_target_display, ESP_LOG_NONE);
+
+  /* LVGL v9 (mode-selection menu screen) */
   lv_display_t *disp = lv_display_create(TFT_HOR_RES, TFT_VER_RES);
   lv_display_set_flush_cb(disp, my_disp_flush);
   lv_display_set_buffers(disp, draw_buf, nullptr, sizeof(draw_buf),
@@ -624,6 +577,12 @@ void setup() {
   lv_indev_t *indev = lv_indev_create();
   lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
   lv_indev_set_read_cb(indev, my_touchpad_read);
+
+  /* Avatar is a plain LVGL screen created after lv_init(); no background
+   * drawing task exists anymore. */
+  avatar.begin();
+  avatar.setBatteryIcon(true);
+  avatar.setBatteryStatus(M5.Power.isCharging(), M5.Power.getBatteryLevel());
 
   changeOperationMode(OperationMode::Menu);
 
@@ -645,6 +604,7 @@ static void loopIdle() {
 
 static void loopTestServo() {
   static uint8_t step = 0;
+  static uint32_t last_step_ms = 0;
 
   if (M5.BtnPWR.wasClicked()) {
     avatar.setSpeechText("Stop Test Servo...");
@@ -654,37 +614,48 @@ static void loopTestServo() {
 
   if (servo_controller.isMoving()) {
     // wait for moving done.
-  } else {
-    if (step >= 10) {
-      step = 0;
-      avatar.setSpeechText("");
-      changeOperationMode(OperationMode::Menu);
-      return;
-    } else if (step % 5 == 0) {
-      avatar.setSpeechText("X   0 -> -90 ");
-      servo_controller.moveX(-90);
-    } else if (step % 5 == 1) {
-      avatar.setSpeechText("X -90 -> +90");
-      servo_controller.moveX(90);
-    } else if (step % 5 == 2) {
-      avatar.setSpeechText("X +90 ->   0");
-      servo_controller.moveX(0);
-    } else if (step % 5 == 3) {
-      avatar.setSpeechText("Y   0 -> -15");
-      servo_controller.moveY(-15);
-    } else if (step % 5 == 4) {
-      avatar.setSpeechText("Y -15 ->   0");
-      servo_controller.moveY(0);
-    }
-    step++;
-    delay(1000);
-    servo_controller.waitForAllServosToStop();
+    return;
   }
+  if (step >= 10) {
+    step = 0;
+    last_step_ms = 0;
+    avatar.setSpeechText("");
+    changeOperationMode(OperationMode::Menu);
+    return;
+  }
+  /* Non-blocking rest interval between steps (was delay(1000)). */
+  if (last_step_ms != 0 && (uint32_t)(millis() - last_step_ms) < 1000) {
+    return;
+  }
+
+  switch (step % 5) {
+  case 0:
+    avatar.setSpeechText("X   0 -> -90 ");
+    servo_controller.moveX(-90);
+    break;
+  case 1:
+    avatar.setSpeechText("X -90 -> +90");
+    servo_controller.moveX(90);
+    break;
+  case 2:
+    avatar.setSpeechText("X +90 ->   0");
+    servo_controller.moveX(0);
+    break;
+  case 3:
+    avatar.setSpeechText("Y   0 -> -15");
+    servo_controller.moveY(-15);
+    break;
+  case 4:
+    avatar.setSpeechText("Y -15 ->   0");
+    servo_controller.moveY(0);
+    break;
+  }
+  step++;
+  last_step_ms = millis();
 }
 
 static void loopAdjust() {
-  /* Let LVGL render the servo adjust screen (touch-driven) */
-  lv_timer_handler();
+  /* Servo adjust screen is rendered by the centralized lv_timer_handler(). */
 }
 
 static void loopRandom() {
@@ -719,7 +690,7 @@ static void loopRandom() {
 
     const unsigned long millis_since_last_mouth = millis() - last_mouth_millis;
     if (millis_since_last_mouth > mouth_open_time + mouth_wait) {
-      const float r = (max(random(15), 10l) - 10) / 5.0f;
+      const float r = (fmaxf((float)random(15), 10.0f) - 10.0f) / 5.0f;
       avatar.setMouthOpenRatio(r);
       last_mouth_millis = millis();
     } else if (millis_since_last_mouth > mouth_open_time) {
@@ -773,7 +744,7 @@ static void loopTorqueOff() {
   if (!torque_off_done) {
     servo_controller.torqueOff();
     torque_off_done = true;
-    avatar.setExpression(m5avatar::Expression::Sleepy);
+    avatar.setExpression(Expression::Sleepy);
   }
 }
 
@@ -787,15 +758,19 @@ static void loopBLERemote() {
 }
 
 static void loopMenu() {
-  /* Let LVGL render the menu screen */
-  lv_timer_handler();
+  /* Menu screen is rendered by the centralized lv_timer_handler(). */
 }
 
-static void loopPosition() { lv_timer_handler(); }
+static void loopPosition() {
+  /* Position screen is rendered by the centralized lv_timer_handler(). */
+}
 
 void loop() {
   M5.update();
   // M5_Log_async_update();
+
+  /* All screens (Avatar + UI) are rendered here in one place. */
+  lv_timer_handler();
 
   switch (op_mode) {
   case OperationMode::Idle:

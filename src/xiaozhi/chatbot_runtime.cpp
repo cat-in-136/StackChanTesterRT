@@ -11,7 +11,7 @@
 
 #include "arduino/silent_opus.h"
 
-extern m5avatar::Avatar avatar;
+extern Avatar avatar;
 
 namespace xiaozhi {
 namespace {

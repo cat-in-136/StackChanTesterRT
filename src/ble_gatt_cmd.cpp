@@ -31,11 +31,10 @@ extern ServoController servo_controller;
 #define BLE_MAX_JSON_LEN 2048
 #define BLE_FRAG_HEADER_LEN 10
 
-/* ---- Avatar speech text limit (tentative) ----
- * Balloon has no wrapping/scrolling, so over-long text overflows the
- * 320px display. Until auto-shrink/wrap is implemented, reject text
- * longer than this (bytes) with an error log and keep the old display. */
-#define BLE_SPEECH_TEXT_MAX_LEN 32
+/* ---- Avatar speech text limit ----
+ * The speech bubble scrolls long text, but cap the payload to keep the
+ * fixed-size buffer bounded and reject obviously invalid requests. */
+#define BLE_SPEECH_TEXT_MAX_LEN 128
 
 /* ---- Fragment header magic ---- */
 /* M5 StackChan panel compatibility mapping (tenths of a degree):
@@ -286,19 +285,19 @@ class BleSecurityCallbacks : public BLESecurityCallbacks {
 static BleSecurityCallbacks bleSecurityCallbacks;
 
 /* ---- Handle BLE Avatar weight ----
- * StackChan spec weight 0..100 -> m5avatar open ratio 0.0..1.0. */
-static bool bleAvatarWeight(JsonObject obj, float *out_ratio) {
-  if (obj.isNull() || out_ratio == nullptr)
+ * StackChan spec weight is 0..100. */
+static bool bleAvatarWeight(JsonObject obj, int *out_weight) {
+  if (obj.isNull() || out_weight == nullptr)
     return false;
   JsonVariant w = obj["weight"];
   if (!w.is<int>() && !w.is<float>())
     return false;
-  float weight = w.as<float>();
-  if (weight < 0.0f)
-    weight = 0.0f;
-  if (weight > 100.0f)
-    weight = 100.0f;
-  *out_ratio = weight / 100.0f;
+  int weight = w.as<int>();
+  if (weight < 0)
+    weight = 0;
+  if (weight > 100)
+    weight = 100;
+  *out_weight = weight;
   return true;
 }
 
@@ -361,26 +360,26 @@ static void bleRtDriveServo(bool is_yaw, JsonObject servo) {
 static bool bleRtApplyExpression(JsonVariant v) {
   if (v.isNull())
     return false;
-  m5avatar::Expression exp = m5avatar::Expression::Neutral;
+  Expression exp = Expression::Neutral;
   if (v.is<int>() || v.is<float>()) {
     switch (v.as<int>()) {
     case 0:
-      exp = m5avatar::Expression::Happy;
+      exp = Expression::Happy;
       break;
     case 1:
-      exp = m5avatar::Expression::Angry;
+      exp = Expression::Angry;
       break;
     case 2:
-      exp = m5avatar::Expression::Sad;
+      exp = Expression::Sad;
       break;
     case 3:
-      exp = m5avatar::Expression::Doubt;
+      exp = Expression::Doubt;
       break;
     case 4:
-      exp = m5avatar::Expression::Sleepy;
+      exp = Expression::Sleepy;
       break;
     case 5:
-      exp = m5avatar::Expression::Neutral;
+      exp = Expression::Neutral;
       break;
     default:
       M5_LOGD("expression index out of range");
@@ -393,17 +392,17 @@ static bool bleRtApplyExpression(JsonVariant v) {
     for (char *p = buf; *p; p++)
       *p = tolower((unsigned char)*p);
     if (strcmp(buf, "happy") == 0)
-      exp = m5avatar::Expression::Happy;
+      exp = Expression::Happy;
     else if (strcmp(buf, "angry") == 0)
-      exp = m5avatar::Expression::Angry;
+      exp = Expression::Angry;
     else if (strcmp(buf, "sad") == 0)
-      exp = m5avatar::Expression::Sad;
+      exp = Expression::Sad;
     else if (strcmp(buf, "doubt") == 0)
-      exp = m5avatar::Expression::Doubt;
+      exp = Expression::Doubt;
     else if (strcmp(buf, "sleepy") == 0)
-      exp = m5avatar::Expression::Sleepy;
+      exp = Expression::Sleepy;
     else if (strcmp(buf, "neutral") == 0)
-      exp = m5avatar::Expression::Neutral;
+      exp = Expression::Neutral;
     else {
       M5_LOGD("expression unknown name");
       return false;
@@ -418,7 +417,7 @@ static bool bleRtApplyExpression(JsonVariant v) {
 /* rtSpeechText value: {"cmd":"rtSpeechText","text":"..."}.
  * "speechText" is accepted as an alias for "text". Empty string clears
  * the balloon. Over-long text is rejected with an error log and the
- * display is left unchanged (Balloon has no wrapping).
+ * display is left unchanged.
  * NOTE: runs in the loop task via processBLE(), same as rtExpression. */
 static bool bleRtApplySpeechText(JsonVariant v) {
   if (v.isNull())
@@ -446,8 +445,35 @@ static bool bleRtApplySpeechText(JsonVariant v) {
   return true;
 }
 
+static void bleRtApplyFeature(JsonObject obj, Feature &feature) {
+  bool has_rot = false;
+  int rotation = bleRtClampInt(obj, "rotation", -1800, 1800, 0, &has_rot);
+  if (has_rot)
+    feature.setRotation(rotation);
+
+  bool has_size = false;
+  int size = bleRtClampInt(obj, "size", -100, 100, 0, &has_size);
+  if (has_size)
+    feature.setSize(size);
+}
+
+static void bleRtApplyPosition(JsonObject obj, Feature &feature) {
+  bool has_x = false, has_y = false;
+  int x = bleRtClampInt(obj, "x", -100, 100, 0, &has_x);
+  int y = bleRtClampInt(obj, "y", -100, 100, 0, &has_y);
+  if (!has_x && !has_y)
+    return;
+
+  AvatarPoint position = feature.getPosition();
+  if (has_x)
+    position.x = x;
+  if (has_y)
+    position.y = y;
+  feature.setPosition(position);
+}
+
 static void handleBleRtAvatar(JsonDocument &doc) {
-  float ratio = 0.0f;
+  int weight = 0;
   bool has_eye = false;
 
   const char *keys[2] = {"leftEye", "rightEye"};
@@ -455,61 +481,36 @@ static void handleBleRtAvatar(JsonDocument &doc) {
     if (doc[keys[i]].isNull())
       continue;
     JsonObject eye = doc[keys[i]];
-    if (bleAvatarWeight(eye, &ratio)) {
+    Feature &feature = (i == 0) ? avatar.leftEye() : avatar.rightEye();
+
+    if (bleAvatarWeight(eye, &weight)) {
       if (i == 0)
-        avatar.setLeftEyeOpenRatio(ratio);
+        avatar.setLeftEyeOpenRatio(weight / 100.0f);
       else
-        avatar.setRightEyeOpenRatio(ratio);
+        avatar.setRightEyeOpenRatio(weight / 100.0f);
       has_eye = true;
     }
-    // x/y -> gaze.
+
     bool has_x = false, has_y = false;
     int x = bleRtClampInt(eye, "x", -100, 100, 0, &has_x);
     int y = bleRtClampInt(eye, "y", -100, 100, 0, &has_y);
     if (has_x || has_y) {
-      float h = x / 100.0f;
-      float v = y / 100.0f;
       if (i == 0)
-        avatar.setLeftGaze(v, h);
+        avatar.setLeftGaze(y / 100.0f, x / 100.0f);
       else
-        avatar.setRightGaze(v, h);
+        avatar.setRightGaze(y / 100.0f, x / 100.0f);
     }
-    bool has_rot = false;
-    int rot = bleRtClampInt(eye, "rotation", -180, 180, 0, &has_rot);
-    if (has_rot)
-      avatar.setRotation(rot * 3.14159265f / 180.0f); // global, last wins
-    bool has_size = false;
-    int sz = bleRtClampInt(eye, "size", -100, 100, 0, &has_size);
-    if (has_size) {
-      float s = 1.0f + sz / 100.0f;
-      if (s < 0.1f)
-        s = 0.1f;
-      if (s > 2.0f)
-        s = 2.0f;
-      avatar.setScale(s); // global, last wins
-    }
+    bleRtApplyFeature(eye, feature);
   }
   if (has_eye)
     avatar.setIsAutoBlink(false);
 
   if (!doc["mouth"].isNull()) {
     JsonObject mouth = doc["mouth"];
-    if (bleAvatarWeight(mouth, &ratio))
-      avatar.setMouthOpenRatio(ratio);
-    bool has_rot = false;
-    int rot = bleRtClampInt(mouth, "rotation", -180, 180, 0, &has_rot);
-    if (has_rot)
-      avatar.setRotation(rot * 3.14159265f / 180.0f);
-    bool has_size = false;
-    int sz = bleRtClampInt(mouth, "size", -100, 100, 0, &has_size);
-    if (has_size) {
-      float s = 1.0f + sz / 100.0f;
-      if (s < 0.1f)
-        s = 0.1f;
-      if (s > 2.0f)
-        s = 2.0f;
-      avatar.setScale(s);
-    }
+    if (bleAvatarWeight(mouth, &weight))
+      avatar.setMouthOpenRatio(weight / 100.0f);
+    bleRtApplyPosition(mouth, avatar.mouth());
+    bleRtApplyFeature(mouth, avatar.mouth());
   }
   if (!doc["expression"].isNull())
     bleRtApplyExpression(doc["expression"]);
