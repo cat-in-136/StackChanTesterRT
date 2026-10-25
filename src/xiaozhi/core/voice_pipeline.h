@@ -46,9 +46,8 @@ class VoicePipeline {
   };
 
   Callbacks cb;
-  // 同一 session_id で TEXT を連続送信するため Listening 維持が既定。
-  // (manual でも tts/stop で Idle に落とすと 2 回目の TEXT が送れない)
-  bool tts_stop_returns_to_idle = false;
+  // 状態: Idle=待機 / Listening=録音中 / Processing=処理待ち / Speaking=発話。
+  // tts/stop は常に Idle(待機) へ戻る (session_id の維持は ports 側)。
 
   VoicePipeline() : state_(PipelineState::Idle), last_rx_ms_(0) {}
 
@@ -65,11 +64,17 @@ class VoicePipeline {
   }
   void onHelloOk(const std::string& session_id, uint32_t now_ms) {
     session_id_ = session_id;
+    setState(PipelineState::Idle, now_ms);  // 待機
+  }
+  // 録音開始 (listen/start 送信成功時)。Listening でないと uplinkAllowed() が
+  // 開かず上りが流れない。
+  void onVoiceStart(uint32_t now_ms) {
     setState(PipelineState::Listening, now_ms);
   }
-  // 音声トグル開始 (listen/start 送信成功時)。hello 直後と同様 Listening
-  // に遷移させないと uplinkAllowed() が開かず上りが流れない。
-  void onVoiceStart(uint32_t now_ms) { setState(PipelineState::Listening, now_ms); }
+  // 録音停止/送信完了 → 処理待ち (listen/stop 送信後〜tts/start 待ち)。
+  void onTurnProcessing(uint32_t now_ms) {
+    setState(PipelineState::Processing, now_ms);
+  }
   void onHelloFailed(uint32_t now_ms) { setState(PipelineState::Idle, now_ms); }
   void stopSession(const std::string& /*reason*/, uint32_t now_ms) {
     setState(PipelineState::Idle, now_ms);
@@ -91,20 +96,29 @@ class VoicePipeline {
         if (cb.on_emotion) cb.on_emotion(ev.emotion);
         break;
       case ServerEvent::Kind::TtsStart:
-        // 公式は Speaking 遷移が中心。既に Speaking でも再通知は許容。
+        // 待機/初期化中に届いた TTS は、ローカル中断したターンの遅延応答
+        // として破棄する (BtnA/STOP はサーバへ abort を送らないため)。
+        // Speaking 中の再通知は許容する。
+        if (state_ == PipelineState::Idle ||
+            state_ == PipelineState::Connecting)
+          break;
         setState(PipelineState::Speaking, now_ms);
         if (cb.on_tts_start) cb.on_tts_start();
         break;
       case ServerEvent::Kind::TtsStop:
-        // 公式 application.cc:629-638: Speaking 時のみ遷移、manual→Idle。
-        if (state_ != PipelineState::Speaking) break;
+        // 発話終了は常に待機へ。処理待ちでの stop (音声なし応答) も
+        // ターン終了として扱う。
+        if (state_ != PipelineState::Speaking &&
+            state_ != PipelineState::Processing)
+          break;
         if (cb.on_tts_stop) cb.on_tts_stop();
-        if (tts_stop_returns_to_idle)
-          setState(PipelineState::Idle, now_ms);
-        else
-          setState(PipelineState::Listening, now_ms);
+        setState(PipelineState::Idle, now_ms);
         break;
       case ServerEvent::Kind::TtsSentence:
+        // 中断済みターン (待機/初期化中) の字幕は捨てる。
+        if (state_ == PipelineState::Idle ||
+            state_ == PipelineState::Connecting)
+          break;
         if (cb.on_chat_text) cb.on_chat_text("assistant", ev.text);
         break;
       case ServerEvent::Kind::Alert:

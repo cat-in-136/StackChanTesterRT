@@ -39,10 +39,11 @@ enum class TextFormat : uint8_t {
 };
 
 enum class PipelineState : uint8_t {
-  Idle = 0,
-  Connecting,
-  Listening,
-  Speaking,
+  Idle = 0,      // 待機 (セッション維持・未録音)
+  Connecting,    // (initial) hello 待ち
+  Listening,     // 録音中 (mic 上り有効)
+  Processing,    // 処理待ち (listen/stop 送信後〜tts/start 前)
+  Speaking,      // 発話(再生)
 };
 
 inline const char* toStr(PipelineState s) {
@@ -53,6 +54,8 @@ inline const char* toStr(PipelineState s) {
       return "Connecting";
     case PipelineState::Listening:
       return "Listening";
+    case PipelineState::Processing:
+      return "Processing";
     case PipelineState::Speaking:
       return "Speaking";
   }

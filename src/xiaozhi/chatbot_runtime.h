@@ -33,8 +33,8 @@ class ChatbotRuntime {
   void start();
   void stop();
   void abort();
-  // 音声トグル (ToggleChatState 相当: Idle→開始 / Listening→停止 /
-  // Speaking→Abort)。未接続時は start() (再接続) にフォールバック。
+  // 音声トグル (待機→Listening / Listening→処理待ち /
+  // 処理待ち・発話→待機)。未接続時は start() (再接続) にフォールバック。
   void toggleVoice();
   bool voiceActive() const { return voice_active_; }
   void setFormatB(bool use_b);
@@ -77,11 +77,11 @@ class ChatbotRuntime {
   // 上りポンプ: Listening+voice_active_ の間のみ mic→encode→UDP送信。
   // 半二重のため Speaking 中は呼ばない (tts_start で mic 停止済み)。
   void pumpVoice(uint32_t now);
-  // listen/start(auto)+mic開始。false=未接続/mic失敗 (送信なし)。
+  // listen/start(manual)+mic開始 (待機→Listening)。false=未接続/mic失敗。
   bool startVoice();
-  // listen/stop 送信 + Idle (ToggleChatState の Listening→停止)。
+  // listen/stop 送信 + 処理待ち (Listening→Processing)。セッションは維持。
   void stopVoice();
-  // abort 送信 + 再生即時停止 + Idle (同 Speaking→Abort)。接続は維持。
+  // ローカル破棄 + 待機 (処理待ち/発話→Idle)。セッションは維持。
   void abortVoice();
   // Speaking中の口パク駆動 (180msトグル)。loop から呼ぶ。
   void driveMouth(uint32_t now);

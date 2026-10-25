@@ -365,8 +365,7 @@ void ChatbotRuntime::sendHello() {
 }
 
 void ChatbotRuntime::setupPipeCallbacks() {
-  // 同一 session_id 継続: tts/stop 後も Listening 維持 (Idle に落とさない)。
-  pipe_.tts_stop_returns_to_idle = false;
+  // tts/stop は常に待機 (Idle) へ戻る。session_id は ports 側で維持する。
   pipe_.cb.on_state = [](PipelineState s) {
     M5_LOGI("chatbot: pipeline -> %s", toStr(s));
   };
@@ -410,14 +409,9 @@ void ChatbotRuntime::setupPipeCallbacks() {
     closeMouth();
     // 次の TEXT で listen/start から送り直すため (同一 sid 継続)。
     listen_started_ = false;
-    // 音声セッション継続中なら採取再開 (manual一発話では stop 済みのため
-    // 通常ここは通らない。保険)。失敗時は stopVoice で閉じる。
-    if (voice_active_) {
-      if (!mic_.start()) {
-        M5_LOGE("chatbot: mic resume failed -> voice stop");
-        stopVoice();
-      }
-    }
+    // ターン終了 (tts/stop) で音声セッションを閉じる。次発話は
+    // startVoice/sendText が listen/start から送り直す (manual 1 ターン=1 listen)。
+    voice_active_ = false;
   };
   pipe_.cb.on_alert = [](const std::string& m) {
     M5_LOGI("chatbot: alert %.120s", m.c_str());
@@ -699,9 +693,8 @@ void ChatbotRuntime::loop() {
 
 bool ChatbotRuntime::sendText(const char* text) {
   if (!active_ || !text || !text[0]) return false;
-  // 同一 session_id 継続: Idle でも Ready+接続中なら送信可とする。
-  // (tts/stop 後は Listening 維持が既定だが、ABORT/STOP 直後の Idle 復帰用)。
-  // hello 未完了 (Connecting) のみ拒否する。
+  // 待機/処理待ち/発話中でも Ready+接続中なら送信可。hello 未完了
+  // (Connecting) のみ拒否する。
   if (phase_ != PhReady || pipe_.state() == PipelineState::Connecting) {
     last_error_ = "not ready (hello not done)";
     return false;
@@ -729,8 +722,9 @@ bool ChatbotRuntime::sendText(const char* text) {
   if (ok) {
     M5_LOGI("chatbot: tx text fmt=%s %.120s",
             fmt_ == TextFormat::A_DetectText ? "A" : "B", text);
+    // TEXT 応答待ちも処理待ちに揃える (tts/start で発話、tts/stop で待機)。
+    if (pipe_.state() == PipelineState::Idle) pipe_.onTurnProcessing(now);
   }
-  (void)now;
   return ok;
 }
 
@@ -751,24 +745,29 @@ void ChatbotRuntime::start() {
     connectMqtt();
     return;
   }
-  // 公式は毎回 OpenAudioChannel->hello で session 更新。旧 sid 再利用はしない。
-  // Idle なら再接続からやり直す。
-  if (pipe_.state() == PipelineState::Idle) {
-    connectMqtt();
+  if (phase_ == PhMqttConnect || phase_ == PhHelloWait) return;  // 接続処理中
+  if (!transportConnected() || pipe_.sessionId().empty()) {
+    connectMqtt();  // 新規 session (hello) を張り直す
     return;
   }
+  // 接続済み: 待機からのみ録音開始 (:CHAT:START = 再接続 + listen/start)。
+  if (pipe_.state() == PipelineState::Idle) startVoice();
 }
 
 void ChatbotRuntime::stop() {
-  voice_active_ = false;
-  mic_.end();
-  if (pipe_.sessionId().empty()) return;
-  std::string s = buildListenStop(pipe_.sessionId());
-  transportSend(s);
-  pipe_.stopSession("stop", millis());
-  player_.stop();
-  closeMouth();
-  listen_started_ = false;
+  // :CHAT:STOP = 現在の動作を中断。Listening は BtnA と同じく処理待ちへ、
+  // 処理待ち/発話はローカル破棄で待機へ戻す (セッションは維持)。
+  switch (pipe_.state()) {
+    case PipelineState::Listening:
+      stopVoice();
+      break;
+    case PipelineState::Processing:
+    case PipelineState::Speaking:
+      abortVoice();
+      break;
+    default:
+      break;
+  }
 }
 
 void ChatbotRuntime::abort() {
@@ -819,7 +818,8 @@ void ChatbotRuntime::pumpVoice(uint32_t now) {
 }
 
 bool ChatbotRuntime::startVoice() {
-  if (phase_ != PhReady || pipe_.state() == PipelineState::Connecting) {
+  // 待機 (Idle) からのみ録音を開始する。
+  if (phase_ != PhReady || pipe_.state() != PipelineState::Idle) {
     return false;
   }
   if (!transportConnected() || pipe_.sessionId().empty()) return false;
@@ -862,51 +862,51 @@ bool ChatbotRuntime::startVoice() {
 }
 
 void ChatbotRuntime::stopVoice() {
+  // Listening -> Processing: 録音を止め listen/stop を送る。セッションは
+  // 維持し、stt/llm/tts 完了 (tts/stop) で on_tts_stop 経由で待機へ戻る。
   voice_active_ = false;
   mic_.end();
-  // listen/start 済みの場合のみ stop を送る (hello直後のListeningで
-  // トグル停止した場合は送らない)。
   if (!pipe_.sessionId().empty() && listen_started_) {
     std::string s = buildListenStop(pipe_.sessionId());
     transportSend(s);
   }
-  pipe_.stopSession("voice-stop", millis());
+  pipe_.onTurnProcessing(millis());
   listen_started_ = false;
-  showText("Ready");
-  M5_LOGI("chatbot: voice stop");
+  showText("Thinking...");
+  M5_LOGI("chatbot: voice stop -> processing");
   Serial.println("CHAT LISTEN-STOP");
 }
 
 void ChatbotRuntime::abortVoice() {
+  // Processing/Speaking -> Idle(待機): サーバへ abort は送らずローカル破棄。
+  // 中断したターンの遅延 TTS は VoicePipeline が待機中に捨てる。
   voice_active_ = false;
   mic_.end();
-  if (!pipe_.sessionId().empty()) {
-    std::string s = buildAbort(pipe_.sessionId());
-    transportSend(s);
-  }
-  pipe_.abort(millis());
   player_.stop();
   closeMouth();
+  pipe_.abort(millis());
   listen_started_ = false;
   showText("Ready");
-  M5_LOGI("chatbot: voice abort");
+  M5_LOGI("chatbot: voice abort (local discard)");
   Serial.println("CHAT LISTEN-ABORT");
 }
 
-// ToggleChatState 主系のうちウェイクワードを除いた部分
-// (application.cc HandleToggleChatState 互換)。
+// 音声トグル (待機→Listening / Listening→処理待ち / 処理待ち・発話→待機)。
 void ChatbotRuntime::toggleVoice() {
   if (!active_) return;
-  PipelineState s = pipe_.state();
-  if (s == PipelineState::Listening) {
-    stopVoice();
-    return;
+  switch (pipe_.state()) {
+    case PipelineState::Listening:
+      stopVoice();
+      return;
+    case PipelineState::Processing:
+    case PipelineState::Speaking:
+      abortVoice();
+      return;
+    case PipelineState::Idle:
+    case PipelineState::Connecting:
+      break;
   }
-  if (s == PipelineState::Speaking) {
-    abortVoice();
-    return;
-  }
-  // Idle/Connecting: 未接続なら再接続、既接続なら開始。
+  // 待機/初期化中: 未接続なら再接続、接続済みなら録音開始。
   if (phase_ != PhReady || !transportConnected() ||
       pipe_.sessionId().empty()) {
     start();
